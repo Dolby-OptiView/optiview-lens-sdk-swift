@@ -1,0 +1,115 @@
+import XCTest
+#if canImport(CoreFoundation)
+import CoreFoundation
+#endif
+@testable import LensSDK
+
+/// Replays conformance/fixtures/transport-behavior.json — the cross-platform
+/// delivery-behavior contract: queue scoping, sequence numbers, flush
+/// boundaries, consent purge. Posts must match the web reference byte for byte.
+final class BehaviorTests: XCTestCase {
+    private let eventTypes: [String: LensEventType<LensPayload>] = [
+        "abs": .adBreakStart, "as": .adStart, "ae": .adEnd, "abe": .adBreakEnd, "sk": .adSkip,
+    ]
+
+    override func tearDown() {
+        TransportRuntime.postOverride = nil
+        Lens.nowForTesting = nil
+        TransportRuntime.resetSnRegistryForTesting()
+        Lens.resetConfigurationForTesting()
+        super.tearDown()
+    }
+
+    private func normalize(_ value: Any) -> Any {
+        guard let number = value as? NSNumber else { return value }
+        if CFGetTypeID(number) == CFBooleanGetTypeID() { return number.boolValue }
+        if number.doubleValue.truncatingRemainder(dividingBy: 1) == 0 { return number.intValue }
+        return number.doubleValue
+    }
+
+    private func parseDestinations(_ raw: [[String: Any]]?) -> [LensDestination] {
+        (raw ?? []).map { d in
+            var batch: LensBatch?
+            if let b = d["batch"] as? [String: Any] {
+                batch = LensBatch(
+                    maxEvents: (b["maxEvents"] as? NSNumber)?.intValue,
+                    maxDelayMs: (b["maxDelayMs"] as? NSNumber)?.int64Value
+                )
+            }
+            return LensDestination(
+                url: d["url"] as! String,
+                format: (d["format"] as? String) == "json" ? .json : .cmcd,
+                batch: batch
+            )
+        }
+    }
+
+    private func payload(_ step: [String: Any]) -> LensPayload? {
+        guard let custom = step["custom"] as? [String: Any] else { return nil }
+        return LensPayload(custom: custom.mapValues(normalize))
+    }
+
+    func testReproducesTheBehaviorGoldensByteIdentically() throws {
+        let fixtureUrl = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("conformance/fixtures/transport-behavior.json")
+        let root = try JSONSerialization.jsonObject(with: Data(contentsOf: fixtureUrl)) as! [String: Any]
+        let cases = root["cases"] as! [[String: Any]]
+        XCTAssertGreaterThan(cases.count, 0)
+
+        for fixture in cases {
+            let name = fixture["name"] as! String
+            var posts: [(url: String, contentType: String, body: String)] = []
+            TransportRuntime.postOverride = { url, body, contentType in posts.append((url, contentType, body)) }
+            TransportRuntime.resetSnRegistryForTesting()
+            Lens.resetConfigurationForTesting()
+            var handles: [String: LensHandle] = [:]
+
+            for step in fixture["script"] as! [[String: Any]] {
+                let op = step["op"] as! String
+                switch op {
+                case "clock":
+                    let ms = (step["ms"] as! NSNumber).int64Value
+                    Lens.nowForTesting = { ms }
+                case "configure":
+                    let backend = (step["backend"] as! String)
+                    try Lens.configure(LensConfigureOptions(backend:
+                        backend == "disabled" ? .disabled : .production
+                    ))
+                case "join":
+                    handles[step["handle"] as! String] = try Lens.join(LensJoinOptions(
+                        namespace: step["namespace"] as! String,
+                        destinations: parseDestinations(step["destinations"] as? [[String: Any]])
+                    ))
+                case "startSession":
+                    handles[step["handle"] as! String]!
+                        .startSession(LensStartSessionOptions(sessionId: step["sessionId"] as? String))
+                case "endSession":
+                    handles[step["handle"] as! String]!.endSession()
+                case "emit":
+                    handles[step["handle"] as! String]!
+                        .emit(eventTypes[step["type"] as! String]!, payload: payload(step))
+                case "emitCustom":
+                    handles[step["handle"] as! String]!
+                        .emitCustom(step["name"] as! String, payload: payload(step))
+                case "setConsent":
+                    handles[step["handle"] as! String]!
+                        .setConsent((step["consent"] as! String) == "denied" ? .denied : .granted)
+                case "dispose":
+                    handles[step["handle"] as! String]!.dispose()
+                default:
+                    XCTFail("unknown op \(op) in \(name)")
+                }
+            }
+
+            let expected = fixture["expected"] as! [[String: Any]]
+            XCTAssertEqual(posts.count, expected.count, name)
+            for (index, e) in expected.enumerated() where index < posts.count {
+                XCTAssertEqual(posts[index].url, e["url"] as! String, name)
+                XCTAssertEqual(posts[index].contentType, e["contentType"] as! String, name)
+                XCTAssertEqual(posts[index].body, e["body"] as! String, name)
+            }
+        }
+    }
+}
