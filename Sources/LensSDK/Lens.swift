@@ -52,6 +52,19 @@ public enum Lens {
     /// Test seam: deterministic timestamps for the behavioral fixtures.
     nonisolated(unsafe) internal static var nowForTesting: (() -> Int64)?
 
+    /// Starts a repeating tick; the returned closure stops it. A dispatch timer
+    /// coalesces periods missed while the app was suspended instead of firing a
+    /// catch-up burst. Swappable so tests drive the cadence by hand.
+    nonisolated(unsafe) internal static var ticker: (Int64, @escaping () -> Void) -> () -> Void = { intervalMs, tick in
+        let queue = DispatchQueue(label: "com.dolby.optiview.lens.heartbeat")
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        let interval = DispatchTimeInterval.milliseconds(Int(intervalMs))
+        timer.schedule(deadline: .now() + interval, repeating: interval)
+        timer.setEventHandler(handler: tick)
+        timer.activate()
+        return { timer.cancel() }
+    }
+
     /// Fails on invalid usage (programmer error). Swappable so tests can
     /// observe violations instead of crashing the test process.
     nonisolated(unsafe) internal static var usageViolation: (String) -> Void = { message in
@@ -62,6 +75,16 @@ public enum Lens {
         guard Validation.matches(options.namespace, Validation.setupPattern) else {
             throw LensError.invalidOptions("Lens: namespace must be 1-64 printable ASCII characters")
         }
+        guard options.namespace.lowercased() != Validation.lensNamespace else {
+            throw LensError.invalidOptions(
+                "Lens: namespace '\(Validation.lensNamespace)' is reserved for the SDK's own reports"
+            )
+        }
+        guard options.heartbeatMs == 0 || options.heartbeatMs >= Validation.minHeartbeatMs else {
+            throw LensError.invalidOptions(
+                "Lens: heartbeatMs must be 0 (off) or at least \(Validation.minHeartbeatMs) milliseconds"
+            )
+        }
         return Handle(options: options, backend: lockBackend())
     }
 
@@ -70,15 +93,19 @@ public enum Lens {
         private let namespace: String
         private let strict: Bool
         private let transport: Transport
+        private let heartbeatMs: Int64
         private var consent: LensConsent
         private var current: LensSession?
         private var disposed = false
+        private var stopHeartbeat: (() -> Void)?
+        private var heartbeatKeys: LensEventKeys?
 
         init(options: LensJoinOptions, backend: EffectiveBackend) {
             self.namespace = options.namespace
             self.strict = options.strict
             self.transport = Transport(destinations: options.destinations, backend: backend)
             self.consent = options.consent
+            self.heartbeatMs = options.heartbeatMs
         }
 
         @discardableResult
@@ -91,12 +118,14 @@ public enum Lens {
             defer { lock.unlock() }
             let session = LensSession(sessionId: options.sessionId ?? UUID().uuidString.lowercased())
             if !disposed { current = session }
+            armHeartbeat()
             return session
         }
 
         func endSession() {
             lock.lock()
             current = nil
+            cancelHeartbeat()
             lock.unlock()
             transport.flush()
         }
@@ -116,13 +145,31 @@ public enum Lens {
             dispatch(type: "ce", customName: name, payload: payload)
         }
 
+        func setHeartbeatPayload(_ payload: LensPayload?) {
+            // Validated here, on the caller's thread and stack, so strict mode
+            // can report at the line that got it wrong — a tick has nobody to
+            // blame, and integrator code never runs on the timer queue.
+            let (checked, drop) = Validation.checkedCustomKeys(payload?.custom, strict: strict)
+            if drop { return }
+            lock.lock()
+            defer { lock.unlock() }
+            guard !disposed else { return }
+            heartbeatKeys = checked
+        }
+
         func setConsent(_ consent: LensConsent) {
             lock.lock()
             guard !disposed else {
                 lock.unlock()
                 return
             }
+            guard self.consent != consent else {
+                lock.unlock()
+                return
+            }
             self.consent = consent
+            // Denial silences the cadence rather than ticking into a drop.
+            armHeartbeat()
             lock.unlock()
             if consent == .denied { transport.purge() }
         }
@@ -131,6 +178,7 @@ public enum Lens {
             lock.lock()
             disposed = true
             current = nil
+            cancelHeartbeat()
             lock.unlock()
             transport.dispose()
         }
@@ -149,16 +197,65 @@ public enum Lens {
                 timestamp: Lens.nowForTesting?() ?? Int64(Date().timeIntervalSince1970 * 1000),
                 session: session
             )
+            deliver(event, heartbeat: false)
+        }
+
+        /// The session's liveness report (`e=t`), one per tick, always in this
+        /// handle's namespace — a receiver's liveness stream must not come and
+        /// go with the integrator's state. Reaches only destinations that take
+        /// heartbeats.
+        private func heartbeat() {
+            lock.lock()
+            defer { lock.unlock() }
+            guard let session = current, !disposed, consent == .granted else { return }
+            let keys = heartbeatKeys
+            deliver(
+                LensEvent(
+                    type: "t",
+                    customName: nil,
+                    namespace: namespace,
+                    keys: keys,
+                    timestamp: Lens.nowForTesting?() ?? Int64(Date().timeIntervalSince1970 * 1000),
+                    session: session
+                ),
+                heartbeat: true
+            )
+        }
+
+        // Callers hold `lock`.
+        private func deliver(_ event: LensEvent, heartbeat: Bool) {
+            func eligible(_ destination: LensDestination) -> Bool {
+                matches(destination, event) && (!heartbeat || takesHeartbeat(destination))
+            }
             if let sink = Lens.sinkForTesting {
                 for index in transport.declaredDestinationIndices {
                     let destination = transport.destinations[index]
-                    if matches(destination, event) { sink(destination, event) }
+                    if eligible(destination) { sink(destination, event) }
                 }
                 return
             }
-            for (index, destination) in transport.destinations.enumerated() where matches(destination, event) {
+            for (index, destination) in transport.destinations.enumerated() where eligible(destination) {
                 transport.enqueue(index: index, event: event)
             }
+        }
+
+        /// One timer at a time, and only while a consenting session is live.
+        /// Callers hold `lock`.
+        private func armHeartbeat() {
+            cancelHeartbeat()
+            guard !disposed, current != nil, consent == .granted, heartbeatMs != 0 else { return }
+            stopHeartbeat = Lens.ticker(heartbeatMs) { [weak self] in self?.heartbeat() }
+        }
+
+        // Callers hold `lock`.
+        private func cancelHeartbeat() {
+            stopHeartbeat?()
+            stopHeartbeat = nil
+        }
+
+        /// CMCD event targets get liveness by default; any other format opts in.
+        private func takesHeartbeat(_ destination: LensDestination) -> Bool {
+            destination.heartbeat ?? (destination.format == .cmcd)
         }
 
         private func matches(_ destination: LensDestination, _ event: LensEvent) -> Bool {

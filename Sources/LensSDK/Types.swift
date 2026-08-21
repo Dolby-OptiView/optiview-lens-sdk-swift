@@ -37,17 +37,23 @@ public struct LensJoinOptions {
     /// and playback is never at risk. Setup problems (join/startSession
     /// arguments) always fail.
     public var strict: Bool
+    /// Cadence of the session's liveness report (CMCD `e=t`), which Lens sends
+    /// on its own — integrators never report it. Spec default 30000 ms; 0 turns
+    /// it off; otherwise at least 1000 ms.
+    public var heartbeatMs: Int64
 
     public init(
         namespace: String,
         destinations: [LensDestination] = [],
         consent: LensConsent = .granted,
-        strict: Bool = false
+        strict: Bool = false,
+        heartbeatMs: Int64 = 30_000
     ) {
         self.namespace = namespace
         self.destinations = destinations
         self.consent = consent
         self.strict = strict
+        self.heartbeatMs = heartbeatMs
     }
 }
 
@@ -72,6 +78,13 @@ public protocol LensHandle: AnyObject {
     /// simple token (letters, digits, '-', '_'); otherwise the event is dropped.
     /// Takes the same `LensPayload` shape as free-form standard events.
     func emitCustom(_ name: String, payload: LensPayload?)
+    /// Attach this integrator's current state to the session's liveness
+    /// reports: every heartbeat from now on carries these keys, in this
+    /// handle's namespace either way — keys come and go, the namespace does
+    /// not. Latest call wins; nil (or nothing valid left) goes back to a plain
+    /// liveness report. Sets state only — it never sends and never shifts the
+    /// cadence. The payload's top level is Lens's; `custom` is yours.
+    func setHeartbeatPayload(_ payload: LensPayload?)
     func setConsent(_ consent: LensConsent)
     func dispose()
 }
@@ -88,6 +101,10 @@ public extension LensHandle {
 
     func emitCustom(_ name: String) {
         emitCustom(name, payload: nil)
+    }
+
+    func setHeartbeatPayload() {
+        setHeartbeatPayload(nil)
     }
 }
 
@@ -162,10 +179,22 @@ public struct LensDestination {
     public var format: LensFormat
     /// Delivery hints, consumed by the transport: flush at maxEvents pending, or when the oldest event has waited maxDelayMs (0 = per event).
     public var batch: LensBatch?
+    /// Whether this destination receives the SDK's liveness reports (`e=t`).
+    /// Defaults to true for `.cmcd` — a CMCD event target is what the heartbeat
+    /// is specified for — and false for every other format, so receivers only
+    /// get liveness traffic they asked for.
+    public var heartbeat: Bool?
 
-    public init(url: String, filter: LensDestinationFilter? = nil, format: LensFormat = .cmcd, batch: LensBatch? = nil) {
+    public init(
+        url: String,
+        filter: LensDestinationFilter? = nil,
+        format: LensFormat = .cmcd,
+        batch: LensBatch? = nil,
+        heartbeat: Bool? = nil
+    ) {
         self.url = url
         self.filter = filter
+        self.heartbeat = heartbeat
         self.format = format
         self.batch = batch
     }

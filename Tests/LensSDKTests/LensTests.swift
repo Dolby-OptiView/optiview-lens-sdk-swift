@@ -17,8 +17,35 @@ final class LensTests: XCTestCase {
         }
     }
 
+    /// The heartbeat cadence, driven by hand.
+    private final class Ticker {
+        let intervalMs: Int64
+        let tick: () -> Void
+        var stopped = false
+
+        init(intervalMs: Int64, tick: @escaping () -> Void) {
+            self.intervalMs = intervalMs
+            self.tick = tick
+        }
+    }
+
+    private var tickers: [Ticker] = []
+    private let defaultTicker = Lens.ticker
+
+    private func captureTickers() {
+        tickers = []
+        Lens.ticker = { [self] intervalMs, tick in
+            let ticker = Ticker(intervalMs: intervalMs, tick: tick)
+            tickers.append(ticker)
+            return { ticker.stopped = true }
+        }
+    }
+
+    private var running: [Ticker] { tickers.filter { !$0.stopped } }
+
     override func tearDown() {
         Lens.sinkForTesting = nil
+        Lens.ticker = defaultTicker
         Lens.resetConfigurationForTesting()
         super.tearDown()
     }
@@ -261,6 +288,232 @@ final class LensTests: XCTestCase {
         lens.setConsent(.granted)
         lens.emit(.adEnd)
         XCTAssertEqual(delivered.count, 1)
+    }
+
+    // MARK: heartbeat
+
+    func testHeartbeatRunsAtTheSpecDefaultCadenceForTheLifeOfTheSession() throws {
+        captureSink()
+        captureTickers()
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
+        XCTAssertEqual(running.count, 0) // no session, no cadence
+        let session = lens.startSession()
+        XCTAssertEqual(running.count, 1)
+        XCTAssertEqual(running[0].intervalMs, 30_000)
+
+        running[0].tick()
+        XCTAssertEqual(delivered.count, 1)
+        let event = delivered[0].event
+        XCTAssertEqual(event.type, "t")
+        XCTAssertEqual(event.namespace, "ads")
+        XCTAssertNil(event.customName)
+        XCTAssertNil(event.keys)
+        XCTAssertEqual(event.session.sessionId, session.sessionId)
+
+        lens.endSession()
+        XCTAssertEqual(running.count, 0)
+    }
+
+    func testHeartbeatIsOffAtZeroAndRejectsCadencesThatAreNotASaneInterval() throws {
+        captureTickers()
+        let off = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest], heartbeatMs: 0))
+        off.startSession()
+        XCTAssertEqual(running.count, 0)
+
+        for heartbeatMs in [Int64(-1), 999, .min] {
+            XCTAssertThrowsError(try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: heartbeatMs)))
+        }
+    }
+
+    func testTheLensNamespaceIsReservedAndIntegratorsCannotForgeATimeInterval() throws {
+        captureSink()
+        XCTAssertThrowsError(try Lens.join(LensJoinOptions(namespace: "lens")))
+        XCTAssertThrowsError(try Lens.join(LensJoinOptions(namespace: "LENS")))
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
+        lens.startSession()
+        lens.emitCustom("t")
+        XCTAssertEqual(delivered[0].event.type, "ce")
+        XCTAssertEqual(delivered[0].event.customName, "t")
+        XCTAssertEqual(delivered[0].event.namespace, "ads")
+    }
+
+    func testHeartbeatKeepsOneCadenceAcrossASessionRollOnTheNewSid() throws {
+        captureSink()
+        captureTickers()
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
+        lens.startSession()
+        let rolled = lens.startSession()
+        XCTAssertEqual(running.count, 1)
+        running[0].tick()
+        XCTAssertEqual(delivered.count, 1)
+        XCTAssertEqual(delivered[0].event.session.sessionId, rolled.sessionId)
+
+        lens.dispose()
+        XCTAssertEqual(running.count, 0)
+    }
+
+    func testHeartbeatGoesSilentWhileConsentIsDenied() throws {
+        captureSink()
+        captureTickers()
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
+        lens.startSession()
+        let stale = running[0]
+        lens.setConsent(.denied)
+        XCTAssertEqual(running.count, 0)
+        stale.tick()
+        XCTAssertEqual(delivered.count, 0)
+
+        lens.setConsent(.granted)
+        XCTAssertEqual(running.count, 1)
+        running[0].tick()
+        XCTAssertEqual(delivered.count, 1)
+    }
+
+    func testHeartbeatTickerStaysRunningWhenConsentIsReasserted() throws {
+        captureTickers()
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
+        lens.startSession()
+        let ticker = try XCTUnwrap(running.first)
+
+        lens.setConsent(.granted)
+
+        XCTAssertTrue(running.first === ticker)
+    }
+
+    func testHeartbeatReachesCmcdEventTargetsByDefaultAndOtherFormatsOnlyOnRequest() throws {
+        captureSink()
+        captureTickers()
+        let lens = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads",
+                destinations: [
+                    LensDestination(url: "https://cmcd.test"),
+                    LensDestination(url: "https://cmcd-opted-out.test", heartbeat: false),
+                    LensDestination(url: "https://adops.test", format: .json),
+                    LensDestination(url: "https://adops-opted-in.test", format: .json, heartbeat: true),
+                    LensDestination(url: "https://live-only.test", filter: LensDestinationFilter(namespaces: ["live"])),
+                ]
+            )
+        )
+        lens.startSession()
+        running[0].tick()
+        XCTAssertEqual(
+            delivered.map(\.destination.url),
+            ["https://cmcd.test", "https://adops-opted-in.test"]
+        )
+    }
+
+    // MARK: heartbeat payload
+
+    func testContributedKeysRideTheReportAlreadyGoingOutStillOnePerTick() throws {
+        captureSink()
+        captureTickers()
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
+        lens.setHeartbeatPayload(LensPayload(custom: ["pod": "mid-1"]))
+        XCTAssertEqual(running.count, 0) // setting state neither sends nor starts a cadence
+        XCTAssertEqual(delivered.count, 0)
+
+        lens.startSession()
+        running[0].tick()
+        XCTAssertEqual(delivered.count, 1)
+        XCTAssertEqual(delivered[0].event.type, "t")
+        XCTAssertEqual(delivered[0].event.namespace, "ads")
+        XCTAssertEqual(delivered[0].event.keys?["pod"] as? String, "mid-1")
+
+        lens.setHeartbeatPayload(LensPayload(custom: ["pod": "mid-2"])) // latest write wins
+        XCTAssertEqual(delivered.count, 1)
+        running[0].tick()
+        XCTAssertEqual(delivered[1].event.keys?["pod"] as? String, "mid-2")
+    }
+
+    func testAWriteWithNothingValidLeftClearsBackToPlainLiveness() throws {
+        captureSink()
+        captureTickers()
+        let violations = captureViolations()
+        defer { Lens.usageViolation = { preconditionFailure($0) } }
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
+        lens.startSession()
+        var state: LensEventKeys = ["pod": "mid-1"]
+        lens.setHeartbeatPayload(LensPayload(custom: state))
+        state["pod"] = "mutated-after-the-call" // value types snapshot by construction
+        running[0].tick()
+        XCTAssertEqual(delivered[0].event.keys?["pod"] as? String, "mid-1")
+
+        for cleared: LensPayload? in [nil, LensPayload(), LensPayload(custom: [:]), LensPayload(custom: ["sid": "forged"])] {
+            lens.setHeartbeatPayload(cleared)
+            running[0].tick()
+            let event = try XCTUnwrap(delivered.last).event
+            XCTAssertEqual(event.namespace, "ads") // keys come and go; the namespace does not
+            XCTAssertNil(event.keys)
+        }
+        XCTAssertEqual(violations().count, 0) // default mode warns, never fails
+    }
+
+    func testContributedKeysAreHeldToTheEmitPathContract() throws {
+        captureSink()
+        captureTickers()
+        let violations = captureViolations()
+        defer { Lens.usageViolation = { preconditionFailure($0) } }
+        let strict = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest], strict: true))
+        strict.startSession()
+        strict.setHeartbeatPayload(LensPayload(custom: ["sid": "x"]))
+        strict.setHeartbeatPayload(LensPayload(custom: ["ns": "live"]))
+        strict.setHeartbeatPayload(LensPayload(custom: ["adBreak": "x"]))
+        strict.setHeartbeatPayload(LensPayload(custom: [String(repeating: "k", count: 46): "x"]))
+        XCTAssertEqual(violations().count, 4)
+        running[0].tick() // nothing invalid ever reaches a report
+        XCTAssertEqual(delivered[0].event.namespace, "ads")
+        XCTAssertNil(delivered[0].event.keys)
+
+        // Default mode drops the refused key and keeps the rest.
+        let lenient = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
+        lenient.startSession()
+        lenient.setHeartbeatPayload(LensPayload(custom: ["pod": "mid-1", "ad_1": "nope"]))
+        try XCTUnwrap(running.last).tick()
+        let event = try XCTUnwrap(delivered.last).event
+        XCTAssertEqual(event.keys?.count, 1)
+        XCTAssertEqual(event.keys?["pod"] as? String, "mid-1")
+    }
+
+    func testContributedKeysSurviveASessionRollButADisposedHandleKeepsNothing() throws {
+        captureSink()
+        captureTickers()
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
+        lens.startSession()
+        lens.setHeartbeatPayload(LensPayload(custom: ["pod": "mid-1"]))
+        lens.endSession()
+        lens.startSession()
+        running[0].tick()
+        XCTAssertEqual(delivered[0].event.keys?["pod"] as? String, "mid-1")
+
+        lens.dispose()
+        lens.setHeartbeatPayload(LensPayload(custom: ["pod": "mid-2"]))
+        XCTAssertEqual(delivered.count, 1)
+    }
+
+    func testTheNamespaceNeverFlipsSoAFilteredDestinationCannotLoseLiveness() throws {
+        captureSink()
+        captureTickers()
+        let lens = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads",
+                destinations: [
+                    LensDestination(url: "https://ads-only.test", filter: LensDestinationFilter(namespaces: ["ads"])),
+                    LensDestination(url: "https://lens-filtered.test", filter: LensDestinationFilter(namespaces: ["lens"])),
+                    LensDestination(url: "https://adops.test", format: .json),
+                ]
+            )
+        )
+        lens.startSession()
+        running[0].tick() // plain
+        lens.setHeartbeatPayload(LensPayload(custom: ["pod": "mid-1"]))
+        running[0].tick() // contributed
+        lens.setHeartbeatPayload(nil)
+        running[0].tick() // plain again
+        XCTAssertEqual(
+            delivered.map(\.destination.url),
+            ["https://ads-only.test", "https://ads-only.test", "https://ads-only.test"]
+        )
     }
 
     // MARK: dispose

@@ -24,6 +24,15 @@ internal enum Validation {
     /// Setup strings (namespace, external session ids): printable ASCII, max 64 (the spec's sid budget).
     static let setupPattern = "^[\\x20-\\x7E]{1,64}$"
 
+    /// Reserved for reports the SDK would send on its own behalf — no integrator may claim it.
+    static let lensNamespace = "lens"
+
+    /// The spec's default interval-report cadence (CTA-5004-B Table 1).
+    static let defaultHeartbeatMs: Int64 = 30_000
+
+    /// Below this a heartbeat is a flood, not a liveness signal.
+    static let minHeartbeatMs: Int64 = 1_000
+
     static func matches(_ value: String, _ pattern: String) -> Bool {
         value.range(of: pattern, options: .regularExpression) != nil
     }
