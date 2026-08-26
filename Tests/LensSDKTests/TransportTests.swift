@@ -1,11 +1,13 @@
 import XCTest
+
+@testable import LensSDK
+
 #if canImport(CoreFoundation)
-import CoreFoundation
+    import CoreFoundation
 #endif
 #if canImport(FoundationNetworking)
-import FoundationNetworking
+    import FoundationNetworking
 #endif
-@testable import LensSDK
 
 /// URL-loading-layer mock receiver: captures every POST the transport makes.
 final class ReceiverProtocol: URLProtocol {
@@ -41,16 +43,18 @@ final class ReceiverProtocol: URLProtocol {
     override func startLoading() {
         let body = Self.readBody(of: request)
         Self.stateLock.lock()
-        Self.captured.append(Captured(
-            path: request.url?.path ?? "/",
-            contentType: request.value(forHTTPHeaderField: "Content-Type") ?? "",
-            body: body
-        ))
+        Self.captured.append(
+            Captured(
+                path: request.url?.path ?? "/",
+                contentType: request.value(forHTTPHeaderField: "Content-Type") ?? "",
+                body: body
+            ))
         let status = Self.failFirst > 0 ? 500 : 200
         if Self.failFirst > 0 { Self.failFirst -= 1 }
         Self.stateLock.unlock()
 
-        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: nil)!
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: nil)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocolDidFinishLoading(self)
     }
@@ -92,7 +96,9 @@ final class TransportTests: XCTestCase {
         super.tearDown()
     }
 
-    private func waitForRequests(_ count: Int, path: String, timeout: TimeInterval = 2) -> [ReceiverProtocol.Captured] {
+    private func waitForRequests(_ count: Int, path: String, timeout: TimeInterval = 2)
+        -> [ReceiverProtocol.Captured]
+    {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             let matching = ReceiverProtocol.snapshot().filter { $0.path == path }
@@ -153,7 +159,10 @@ final class TransportTests: XCTestCase {
     }
 
     func testWholeDoublesRenderAsIntegersInBothFormats() {
-        let report: [(String, Any)] = [("e", "as"), ("ts", Int64(1)), ("sid", "s"), ("sn", 1), ("v", 2), ("ns", "ads"), ("weight", 2.0), ("ratio", 2.5)]
+        let report: [(String, Any)] = [
+            ("e", "as"), ("ts", Int64(1)), ("sid", "s"), ("sn", 1), ("v", 2), ("ns", "ads"),
+            ("weight", 2.0), ("ratio", 2.5),
+        ]
         let json = Encoding.encodeBody(.json, [report]).body
         XCTAssertTrue(json.contains("\"weight\":2,"))
         XCTAssertTrue(json.contains("\"ratio\":2.5"))
@@ -206,10 +215,11 @@ final class TransportTests: XCTestCase {
     }
 
     func testJsonDestinationsNeverSeeThePrefix() throws {
-        let lens = try Lens.join(LensJoinOptions(
-            namespace: "ads",
-            destinations: [LensDestination(url: "http://mock.lens/adops", format: .json)]
-        ))
+        let lens = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads",
+                destinations: [LensDestination(url: "http://mock.lens/adops", format: .json)]
+            ))
         lens.startSession()
         lens.emitCustom("adBreakAdded", payload: LensPayload(custom: ["count": 2]))
         lens.endSession()
@@ -223,10 +233,15 @@ final class TransportTests: XCTestCase {
     }
 
     func testBatchesPerDestinationHintsAndFlushesOnSessionEnd() throws {
-        let lens = try Lens.join(LensJoinOptions(
-            namespace: "ads",
-            destinations: [LensDestination(url: "http://mock.lens/batched", format: .json, batch: LensBatch(maxEvents: 3))]
-        ))
+        let lens = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads",
+                destinations: [
+                    LensDestination(
+                        url: "http://mock.lens/batched", format: .json,
+                        batch: LensBatch(maxEvents: 3))
+                ]
+            ))
         lens.startSession()
         lens.emit(.adBreakStart)
         lens.emit(.adStart)

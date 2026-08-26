@@ -10,20 +10,31 @@ internal struct CmcdEncoder: ReportEncoder {
     }
 
     private func encodeReport(_ report: [(String, Any)]) -> String {
-        let wire = report
+        let wire =
+            report
             .map { (Encoding.specKeys.contains($0.0) ? $0.0 : Encoding.wirePrefix + $0.0, $0.1) }
             .sorted { $0.0 < $1.0 }
         return wire.map { key, value -> String in
-            if key == "e" { return "\(key)=\(value)" } // event type is a spec token, never quoted
-            let isSpec = Encoding.specKeys.contains(key)
-            if isSpec, !(value is String) { return "\(key)=\(value)" }
-            var text = (value as? Bool).map { $0 ? "true" : "false" } ?? Encoding.numberText(value)
-            if !isSpec { text = Encoding.sanitizeAndTruncate(text, maxUnits: 64) }
-            return "\(key)=\"\(escape(text))\""
+            if key == "e" { return "\(key)=\(value)" }  // event type is a spec token, never quoted
+            if Encoding.specKeys.contains(key) {
+                guard let text = value as? String else { return "\(key)=\(value)" }
+                return "\(key)=\"\(escape(text))\""
+            }
+            return customPair(key, value)
         }.joined(separator: ",")
     }
 
+    /// Custom values MUST be STRING or TOKEN (CTA-5004-B): booleans ride as
+    /// the bare tokens `true`/`false`; everything else — numbers included —
+    /// as a sanitized, truncated sf-string.
+    private func customPair(_ key: String, _ value: Any) -> String {
+        if let flag = value as? Bool { return "\(key)=\(flag ? "true" : "false")" }
+        let text = Encoding.sanitizeAndTruncate(Encoding.numberText(value), maxUnits: 64)
+        return "\(key)=\"\(escape(text))\""
+    }
+
     private func escape(_ value: String) -> String {
-        value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(
+            of: "\"", with: "\\\"")
     }
 }

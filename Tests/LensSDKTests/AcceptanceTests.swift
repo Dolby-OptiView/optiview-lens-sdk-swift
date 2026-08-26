@@ -1,8 +1,10 @@
 import XCTest
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
+
 @testable import LensSDK
+
+#if canImport(FoundationNetworking)
+    import FoundationNetworking
+#endif
 
 /// The v0.1.0 acceptance bar, mirrored from the web reference: exactly what
 /// the Ads SDK will do, end to end, through the real URL-loading layer. Spec
@@ -24,7 +26,9 @@ final class AcceptanceTests: XCTestCase {
         super.tearDown()
     }
 
-    private func waitForRequests(_ count: Int, path: String, timeout: TimeInterval = 3) -> [ReceiverProtocol.Captured] {
+    private func waitForRequests(_ count: Int, path: String, timeout: TimeInterval = 3)
+        -> [ReceiverProtocol.Captured]
+    {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             let matching = ReceiverProtocol.snapshot().filter { $0.path == path }
@@ -47,14 +51,17 @@ final class AcceptanceTests: XCTestCase {
     }
 
     func testRunsTheAdLifecycleIngestOrderedPrefixedCmcdCustomerFilteredShortKeyedJson() throws {
-        let lens = try Lens.join(LensJoinOptions(
-            namespace: "ads",
-            destinations: [LensDestination(
-                url: "http://mock.lens/adops",
-                filter: LensDestinationFilter(namespaces: ["ads"]),
-                format: .json
-            )]
-        ))
+        let lens = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads",
+                destinations: [
+                    LensDestination(
+                        url: "http://mock.lens/adops",
+                        filter: LensDestinationFilter(namespaces: ["ads"]),
+                        format: .json
+                    )
+                ]
+            ))
         lens.startSession()
         lens.emit(.adBreakStart, payload: LensPayload(custom: ["pod": "pre-1"]))
         lens.emit(.adStart, payload: LensPayload(custom: ["ad": "ad-123", "creative": "cr-9"]))
@@ -83,19 +90,24 @@ final class AcceptanceTests: XCTestCase {
         XCTAssertEqual(adops.count, 5)
         XCTAssertTrue(adops.allSatisfy { $0.contentType == "application/json" })
         XCTAssertTrue(adops.allSatisfy { !$0.body.contains("com.dolby.optiview-") })
-        XCTAssertEqual(matches("\"e\":\"([a-z]+)\"", in: adops.map(\.body).joined(separator: "\n")), ["abs", "as", "ae", "ce", "abe"])
+        XCTAssertEqual(
+            matches("\"e\":\"([a-z]+)\"", in: adops.map(\.body).joined(separator: "\n")),
+            ["abs", "as", "ae", "ce", "abe"])
         XCTAssertTrue(adops.contains { $0.body.contains("\"ad\":\"ad-123\"") })
     }
 
     func testKeepsASecondProductOutOfTheCustomerFilterAndOnTheSameMachinery() throws {
-        let ads = try Lens.join(LensJoinOptions(
-            namespace: "ads",
-            destinations: [LensDestination(
-                url: "http://mock.lens/adops",
-                filter: LensDestinationFilter(namespaces: ["ads"]),
-                format: .json
-            )]
-        ))
+        let ads = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads",
+                destinations: [
+                    LensDestination(
+                        url: "http://mock.lens/adops",
+                        filter: LensDestinationFilter(namespaces: ["ads"]),
+                        format: .json
+                    )
+                ]
+            ))
         let live = try Lens.join(LensJoinOptions(namespace: "live"))
         ads.startSession()
         live.startSession()
@@ -105,7 +117,10 @@ final class AcceptanceTests: XCTestCase {
         live.endSession()
 
         let ingest = waitForRequests(2, path: "/ingest")
-        let namespaces = Set(matches("com.dolby.optiview-ns=\"([a-z]+)\"", in: ingest.map(\.body).joined(separator: "\n")))
+        let namespaces = Set(
+            matches(
+                "com.dolby.optiview-ns=\"([a-z]+)\"", in: ingest.map(\.body).joined(separator: "\n")
+            ))
         XCTAssertEqual(namespaces, ["ads", "live"])
 
         let adops = waitForRequests(1, path: "/adops")

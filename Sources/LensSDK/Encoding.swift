@@ -32,7 +32,9 @@ internal enum Encoding {
 
     /// Whole doubles render as integers — matching the web reference ("2", not "2.0").
     static func numberText(_ value: Any) -> String {
-        if let double = value as? Double, double.isFinite, double == double.rounded(), abs(double) < 1e15 {
+        if let double = value as? Double, double.isFinite, double == double.rounded(),
+            abs(double) < 1e15
+        {
             return String(Int64(double))
         }
         return "\(value)"
@@ -59,7 +61,9 @@ internal enum Encoding {
     }
 
     /// One body per flush.
-    static func encodeBody(_ format: LensFormat, _ reports: [[(String, Any)]]) -> (body: String, contentType: String) {
+    static func encodeBody(_ format: LensFormat, _ reports: [[(String, Any)]]) -> (
+        body: String, contentType: String
+    ) {
         let encoder = encoderFor(format)
         return (encoder.encode(reports), encoder.contentType)
     }

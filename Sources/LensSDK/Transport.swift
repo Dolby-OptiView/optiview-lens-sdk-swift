@@ -1,6 +1,7 @@
 import Foundation
+
 #if canImport(FoundationNetworking)
-import FoundationNetworking
+    import FoundationNetworking
 #endif
 
 /// Event delivery: per-handle batching, process-wide (mode, target, sid)
@@ -187,10 +188,14 @@ internal final class Transport {
         guard !queue.pending.isEmpty else { return }
         let events = queue.pending
         queue.pending = []
-        let url = queue.isBuiltIn
+        let url =
+            queue.isBuiltIn
             ? (TransportRuntime.ingestOverride ?? queue.destination.url)
             : queue.destination.url
-        let reports = events.map { Encoding.toReport($0, TransportRuntime.nextSn(url: url, sessionId: $0.session.sessionId)) }
+        let reports = events.map {
+            Encoding.toReport(
+                $0, TransportRuntime.nextSn(url: url, sessionId: $0.session.sessionId))
+        }
         let (body, contentType) = Encoding.encodeBody(queue.destination.format, reports)
         if let postOverride = TransportRuntime.postOverride {
             postOverride(url, body, contentType)

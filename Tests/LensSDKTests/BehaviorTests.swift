@@ -1,8 +1,10 @@
 import XCTest
-#if canImport(CoreFoundation)
-import CoreFoundation
-#endif
+
 @testable import LensSDK
+
+#if canImport(CoreFoundation)
+    import CoreFoundation
+#endif
 
 /// Replays conformance/fixtures/transport-behavior.json — the cross-platform
 /// delivery-behavior contract: queue scoping, sequence numbers, flush
@@ -54,14 +56,17 @@ final class BehaviorTests: XCTestCase {
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("conformance/fixtures/transport-behavior.json")
-        let root = try JSONSerialization.jsonObject(with: Data(contentsOf: fixtureUrl)) as! [String: Any]
+        let root =
+            try JSONSerialization.jsonObject(with: Data(contentsOf: fixtureUrl)) as! [String: Any]
         let cases = root["cases"] as! [[String: Any]]
         XCTAssertGreaterThan(cases.count, 0)
 
         for fixture in cases {
             let name = fixture["name"] as! String
             var posts: [(url: String, contentType: String, body: String)] = []
-            TransportRuntime.postOverride = { url, body, contentType in posts.append((url, contentType, body)) }
+            TransportRuntime.postOverride = { url, body, contentType in
+                posts.append((url, contentType, body))
+            }
             TransportRuntime.resetSnRegistryForTesting()
             Lens.resetConfigurationForTesting()
             var handles: [String: LensHandle] = [:]
@@ -74,17 +79,22 @@ final class BehaviorTests: XCTestCase {
                     Lens.nowForTesting = { ms }
                 case "configure":
                     let backend = (step["backend"] as! String)
-                    try Lens.configure(LensConfigureOptions(backend:
-                        backend == "disabled" ? .disabled : .production
-                    ))
+                    try Lens.configure(
+                        LensConfigureOptions(
+                            backend:
+                                backend == "disabled" ? .disabled : .production
+                        ))
                 case "join":
-                    handles[step["handle"] as! String] = try Lens.join(LensJoinOptions(
-                        namespace: step["namespace"] as! String,
-                        destinations: parseDestinations(step["destinations"] as? [[String: Any]])
-                    ))
+                    handles[step["handle"] as! String] = try Lens.join(
+                        LensJoinOptions(
+                            namespace: step["namespace"] as! String,
+                            destinations: parseDestinations(
+                                step["destinations"] as? [[String: Any]])
+                        ))
                 case "startSession":
                     handles[step["handle"] as! String]!
-                        .startSession(LensStartSessionOptions(sessionId: step["sessionId"] as? String))
+                        .startSession(
+                            LensStartSessionOptions(sessionId: step["sessionId"] as? String))
                 case "endSession":
                     handles[step["handle"] as! String]!.endSession()
                 case "emit":

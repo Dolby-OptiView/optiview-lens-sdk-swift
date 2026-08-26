@@ -1,4 +1,5 @@
 import XCTest
+
 @testable import LensSDK
 
 final class LensTests: XCTestCase {
@@ -63,15 +64,21 @@ final class LensTests: XCTestCase {
 
     func testFirstJoinLocksProductionBackend() throws {
         _ = try Lens.join(LensJoinOptions(namespace: "ads"))
-        XCTAssertThrowsError(try Lens.useDevelopmentBackend(url: "https://dev-ingest.test/events")) { error in
-            XCTAssertEqual(error as? LensError, .invalidOptions("Lens: backend is already locked to 'production'"))
+        XCTAssertThrowsError(try Lens.useDevelopmentBackend(url: "https://dev-ingest.test/events"))
+        { error in
+            XCTAssertEqual(
+                error as? LensError,
+                .invalidOptions("Lens: backend is already locked to 'production'"))
         }
     }
 
     func testRejectsRegisteringADifferentDevIngestUrl() throws {
         try Lens.useDevelopmentBackend(url: "https://dev-a.test/events")
-        XCTAssertThrowsError(try Lens.useDevelopmentBackend(url: "https://dev-b.test/events")) { error in
-            XCTAssertEqual(error as? LensError, .invalidOptions("Lens: a development ingest URL is already registered"))
+        XCTAssertThrowsError(try Lens.useDevelopmentBackend(url: "https://dev-b.test/events")) {
+            error in
+            XCTAssertEqual(
+                error as? LensError,
+                .invalidOptions("Lens: a development ingest URL is already registered"))
         }
         XCTAssertNoThrow(try Lens.useDevelopmentBackend(url: "https://dev-a.test/events"))
     }
@@ -159,7 +166,8 @@ final class LensTests: XCTestCase {
         captureSink()
         let violations = captureViolations()
         defer { Lens.usageViolation = { preconditionFailure($0) } }
-        let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest], strict: true))
+        let lens = try Lens.join(
+            LensJoinOptions(namespace: "ads", destinations: [ingest], strict: true))
         lens.startSession()
         lens.emit(.adStart, payload: LensPayload(custom: ["sid": "x"]))
         lens.emitCustom("adBreakAdded", payload: LensPayload(custom: ["pt": 3]))
@@ -173,7 +181,8 @@ final class LensTests: XCTestCase {
         captureSink()
         let violations = captureViolations()
         defer { Lens.usageViolation = { preconditionFailure($0) } }
-        let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest], strict: true))
+        let lens = try Lens.join(
+            LensJoinOptions(namespace: "ads", destinations: [ingest], strict: true))
         lens.startSession()
         lens.emit(.adStart, payload: LensPayload(custom: ["ad_1": "x"]))
         lens.emit(.adStart, payload: LensPayload(custom: ["adBreak": "x"]))
@@ -190,7 +199,8 @@ final class LensTests: XCTestCase {
         captureSink()
         let violations = captureViolations()
         defer { Lens.usageViolation = { preconditionFailure($0) } }
-        let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest], strict: true))
+        let lens = try Lens.join(
+            LensJoinOptions(namespace: "ads", destinations: [ingest], strict: true))
         lens.startSession()
         lens.emitCustom("com.example.adBreakAdded")
         lens.emitCustom(String(repeating: "x", count: 65))
@@ -212,7 +222,8 @@ final class LensTests: XCTestCase {
     }
 
     func testSetupProblemsAlwaysFail() throws {
-        XCTAssertThrowsError(try Lens.join(LensJoinOptions(namespace: String(repeating: "x", count: 65))))
+        XCTAssertThrowsError(
+            try Lens.join(LensJoinOptions(namespace: String(repeating: "x", count: 65))))
         XCTAssertThrowsError(try Lens.join(LensJoinOptions(namespace: "bad\nname")))
         let violations = captureViolations()
         defer { Lens.usageViolation = { preconditionFailure($0) } }
@@ -259,13 +270,17 @@ final class LensTests: XCTestCase {
 
     func testDeliversToEveryConfiguredDestination() throws {
         captureSink()
-        let lens = try Lens.join(LensJoinOptions(
-            namespace: "ads",
-            destinations: [LensDestination(url: "https://a.test"), LensDestination(url: "https://b.test")]
-        ))
+        let lens = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads",
+                destinations: [
+                    LensDestination(url: "https://a.test"), LensDestination(url: "https://b.test"),
+                ]
+            ))
         lens.startSession()
         lens.emit(.adStart)
-        XCTAssertEqual(delivered.map(\.destination.url).sorted(), ["https://a.test", "https://b.test"])
+        XCTAssertEqual(
+            delivered.map(\.destination.url).sorted(), ["https://a.test", "https://b.test"])
     }
 
     // MARK: consent
@@ -296,7 +311,7 @@ final class LensTests: XCTestCase {
         captureSink()
         captureTickers()
         let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
-        XCTAssertEqual(running.count, 0) // no session, no cadence
+        XCTAssertEqual(running.count, 0)  // no session, no cadence
         let session = lens.startSession()
         XCTAssertEqual(running.count, 1)
         XCTAssertEqual(running[0].intervalMs, 30_000)
@@ -316,12 +331,14 @@ final class LensTests: XCTestCase {
 
     func testHeartbeatIsOffAtZeroAndRejectsCadencesThatAreNotASaneInterval() throws {
         captureTickers()
-        let off = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest], heartbeatMs: 0))
+        let off = try Lens.join(
+            LensJoinOptions(namespace: "ads", destinations: [ingest], heartbeatMs: 0))
         off.startSession()
         XCTAssertEqual(running.count, 0)
 
         for heartbeatMs in [Int64(-1), 999, .min] {
-            XCTAssertThrowsError(try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: heartbeatMs)))
+            XCTAssertThrowsError(
+                try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: heartbeatMs)))
         }
     }
 
@@ -390,8 +407,11 @@ final class LensTests: XCTestCase {
                     LensDestination(url: "https://cmcd.test"),
                     LensDestination(url: "https://cmcd-opted-out.test", heartbeat: false),
                     LensDestination(url: "https://adops.test", format: .json),
-                    LensDestination(url: "https://adops-opted-in.test", format: .json, heartbeat: true),
-                    LensDestination(url: "https://live-only.test", filter: LensDestinationFilter(namespaces: ["live"])),
+                    LensDestination(
+                        url: "https://adops-opted-in.test", format: .json, heartbeat: true),
+                    LensDestination(
+                        url: "https://live-only.test",
+                        filter: LensDestinationFilter(namespaces: ["live"])),
                 ]
             )
         )
@@ -410,7 +430,7 @@ final class LensTests: XCTestCase {
         captureTickers()
         let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
         lens.setHeartbeatPayload(LensPayload(custom: ["pod": "mid-1"]))
-        XCTAssertEqual(running.count, 0) // setting state neither sends nor starts a cadence
+        XCTAssertEqual(running.count, 0)  // setting state neither sends nor starts a cadence
         XCTAssertEqual(delivered.count, 0)
 
         lens.startSession()
@@ -420,7 +440,7 @@ final class LensTests: XCTestCase {
         XCTAssertEqual(delivered[0].event.namespace, "ads")
         XCTAssertEqual(delivered[0].event.keys?["pod"] as? String, "mid-1")
 
-        lens.setHeartbeatPayload(LensPayload(custom: ["pod": "mid-2"])) // latest write wins
+        lens.setHeartbeatPayload(LensPayload(custom: ["pod": "mid-2"]))  // latest write wins
         XCTAssertEqual(delivered.count, 1)
         running[0].tick()
         XCTAssertEqual(delivered[1].event.keys?["pod"] as? String, "mid-2")
@@ -435,18 +455,20 @@ final class LensTests: XCTestCase {
         lens.startSession()
         var state: LensEventKeys = ["pod": "mid-1"]
         lens.setHeartbeatPayload(LensPayload(custom: state))
-        state["pod"] = "mutated-after-the-call" // value types snapshot by construction
+        state["pod"] = "mutated-after-the-call"  // value types snapshot by construction
         running[0].tick()
         XCTAssertEqual(delivered[0].event.keys?["pod"] as? String, "mid-1")
 
-        for cleared: LensPayload? in [nil, LensPayload(), LensPayload(custom: [:]), LensPayload(custom: ["sid": "forged"])] {
+        for cleared: LensPayload? in [
+            nil, LensPayload(), LensPayload(custom: [:]), LensPayload(custom: ["sid": "forged"]),
+        ] {
             lens.setHeartbeatPayload(cleared)
             running[0].tick()
             let event = try XCTUnwrap(delivered.last).event
-            XCTAssertEqual(event.namespace, "ads") // keys come and go; the namespace does not
+            XCTAssertEqual(event.namespace, "ads")  // keys come and go; the namespace does not
             XCTAssertNil(event.keys)
         }
-        XCTAssertEqual(violations().count, 0) // default mode warns, never fails
+        XCTAssertEqual(violations().count, 0)  // default mode warns, never fails
     }
 
     func testContributedKeysAreHeldToTheEmitPathContract() throws {
@@ -454,14 +476,15 @@ final class LensTests: XCTestCase {
         captureTickers()
         let violations = captureViolations()
         defer { Lens.usageViolation = { preconditionFailure($0) } }
-        let strict = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest], strict: true))
+        let strict = try Lens.join(
+            LensJoinOptions(namespace: "ads", destinations: [ingest], strict: true))
         strict.startSession()
         strict.setHeartbeatPayload(LensPayload(custom: ["sid": "x"]))
         strict.setHeartbeatPayload(LensPayload(custom: ["ns": "live"]))
         strict.setHeartbeatPayload(LensPayload(custom: ["adBreak": "x"]))
         strict.setHeartbeatPayload(LensPayload(custom: [String(repeating: "k", count: 46): "x"]))
         XCTAssertEqual(violations().count, 4)
-        running[0].tick() // nothing invalid ever reaches a report
+        running[0].tick()  // nothing invalid ever reaches a report
         XCTAssertEqual(delivered[0].event.namespace, "ads")
         XCTAssertNil(delivered[0].event.keys)
 
@@ -498,18 +521,22 @@ final class LensTests: XCTestCase {
             LensJoinOptions(
                 namespace: "ads",
                 destinations: [
-                    LensDestination(url: "https://ads-only.test", filter: LensDestinationFilter(namespaces: ["ads"])),
-                    LensDestination(url: "https://lens-filtered.test", filter: LensDestinationFilter(namespaces: ["lens"])),
+                    LensDestination(
+                        url: "https://ads-only.test",
+                        filter: LensDestinationFilter(namespaces: ["ads"])),
+                    LensDestination(
+                        url: "https://lens-filtered.test",
+                        filter: LensDestinationFilter(namespaces: ["lens"])),
                     LensDestination(url: "https://adops.test", format: .json),
                 ]
             )
         )
         lens.startSession()
-        running[0].tick() // plain
+        running[0].tick()  // plain
         lens.setHeartbeatPayload(LensPayload(custom: ["pod": "mid-1"]))
-        running[0].tick() // contributed
+        running[0].tick()  // contributed
         lens.setHeartbeatPayload(nil)
-        running[0].tick() // plain again
+        running[0].tick()  // plain again
         XCTAssertEqual(
             delivered.map(\.destination.url),
             ["https://ads-only.test", "https://ads-only.test", "https://ads-only.test"]

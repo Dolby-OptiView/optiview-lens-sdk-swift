@@ -55,7 +55,8 @@ public enum Lens {
     /// Starts a repeating tick; the returned closure stops it. A dispatch timer
     /// coalesces periods missed while the app was suspended instead of firing a
     /// catch-up burst. Swappable so tests drive the cadence by hand.
-    nonisolated(unsafe) internal static var ticker: (Int64, @escaping () -> Void) -> () -> Void = { intervalMs, tick in
+    nonisolated(unsafe) internal static var ticker: (Int64, @escaping () -> Void) -> () -> Void = {
+        intervalMs, tick in
         let queue = DispatchQueue(label: "com.dolby.optiview.lens.heartbeat")
         let timer = DispatchSource.makeTimerSource(queue: queue)
         let interval = DispatchTimeInterval.milliseconds(Int(intervalMs))
@@ -73,7 +74,8 @@ public enum Lens {
 
     public static func join(_ options: LensJoinOptions) throws -> LensHandle {
         guard Validation.matches(options.namespace, Validation.setupPattern) else {
-            throw LensError.invalidOptions("Lens: namespace must be 1-64 printable ASCII characters")
+            throw LensError.invalidOptions(
+                "Lens: namespace must be 1-64 printable ASCII characters")
         }
         guard options.namespace.lowercased() != Validation.lensNamespace else {
             throw LensError.invalidOptions(
@@ -110,13 +112,16 @@ public enum Lens {
 
         @discardableResult
         func startSession(_ options: LensStartSessionOptions) -> LensSession {
-            if let sessionId = options.sessionId, !Validation.matches(sessionId, Validation.setupPattern) {
+            if let sessionId = options.sessionId,
+                !Validation.matches(sessionId, Validation.setupPattern)
+            {
                 Lens.usageViolation("Lens: sessionId must be 1-64 printable ASCII characters")
                 return LensSession(sessionId: UUID().uuidString.lowercased())
             }
             lock.lock()
             defer { lock.unlock() }
-            let session = LensSession(sessionId: options.sessionId ?? UUID().uuidString.lowercased())
+            let session = LensSession(
+                sessionId: options.sessionId ?? UUID().uuidString.lowercased())
             if !disposed { current = session }
             armHeartbeat()
             return session
@@ -234,7 +239,8 @@ public enum Lens {
                 }
                 return
             }
-            for (index, destination) in transport.destinations.enumerated() where eligible(destination) {
+            for (index, destination) in transport.destinations.enumerated()
+            where eligible(destination) {
                 transport.enqueue(index: index, event: event)
             }
         }
@@ -260,8 +266,12 @@ public enum Lens {
 
         private func matches(_ destination: LensDestination, _ event: LensEvent) -> Bool {
             guard let filter = destination.filter else { return true }
-            if let namespaces = filter.namespaces, !namespaces.contains(event.namespace) { return false }
-            if let events = filter.events, !events.contains(event.customName ?? event.type) { return false }
+            if let namespaces = filter.namespaces, !namespaces.contains(event.namespace) {
+                return false
+            }
+            if let events = filter.events, !events.contains(event.customName ?? event.type) {
+                return false
+            }
             return true
         }
     }

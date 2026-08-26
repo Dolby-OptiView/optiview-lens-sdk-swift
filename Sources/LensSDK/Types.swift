@@ -89,21 +89,21 @@ public protocol LensHandle: AnyObject {
     func dispose()
 }
 
-public extension LensHandle {
+extension LensHandle {
     @discardableResult
-    func startSession() -> LensSession {
+    public func startSession() -> LensSession {
         startSession(LensStartSessionOptions())
     }
 
-    func emit<P: LensEventPayload>(_ type: LensEventType<P>) {
+    public func emit<P: LensEventPayload>(_ type: LensEventType<P>) {
         emit(type, payload: nil)
     }
 
-    func emitCustom(_ name: String) {
+    public func emitCustom(_ name: String) {
         emitCustom(name, payload: nil)
     }
 
-    func setHeartbeatPayload() {
+    public func setHeartbeatPayload() {
         setHeartbeatPayload(nil)
     }
 }
@@ -137,17 +137,17 @@ public struct LensEventType<Payload: LensEventPayload> {
     }
 }
 
-public extension LensEventType where Payload == LensPayload {
+extension LensEventType where Payload == LensPayload {
     /// An ad break has started (wire: "abs").
-    static var adBreakStart: LensEventType<LensPayload> { .init("abs") }
+    public static var adBreakStart: LensEventType<LensPayload> { .init("abs") }
     /// An ad has started playing (wire: "as").
-    static var adStart: LensEventType<LensPayload> { .init("as") }
+    public static var adStart: LensEventType<LensPayload> { .init("as") }
     /// An ad has ended (wire: "ae").
-    static var adEnd: LensEventType<LensPayload> { .init("ae") }
+    public static var adEnd: LensEventType<LensPayload> { .init("ae") }
     /// An ad break has ended (wire: "abe").
-    static var adBreakEnd: LensEventType<LensPayload> { .init("abe") }
+    public static var adBreakEnd: LensEventType<LensPayload> { .init("abe") }
     /// An ad was skipped (wire: "sk").
-    static var adSkip: LensEventType<LensPayload> { .init("sk") }
+    public static var adSkip: LensEventType<LensPayload> { .init("sk") }
 }
 
 /// Event payload custom keys — CMCD value types (String, Number, Bool) only,
@@ -251,7 +251,10 @@ public struct LensEvent {
     public let timestamp: Int64
     public let session: LensSession
 
-    internal init(type: String, customName: String?, namespace: String, keys: LensEventKeys?, timestamp: Int64, session: LensSession) {
+    internal init(
+        type: String, customName: String?, namespace: String, keys: LensEventKeys?,
+        timestamp: Int64, session: LensSession
+    ) {
         self.type = type
         self.customName = customName
         self.namespace = namespace
