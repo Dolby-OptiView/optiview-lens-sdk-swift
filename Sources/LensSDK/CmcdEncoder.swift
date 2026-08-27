@@ -15,7 +15,8 @@ internal struct CmcdEncoder: ReportEncoder {
             .map { (Encoding.specKeys.contains($0.0) ? $0.0 : Encoding.wirePrefix + $0.0, $0.1) }
             .sorted { $0.0 < $1.0 }
         return wire.map { key, value -> String in
-            if key == "e" { return "\(key)=\(value)" }  // event type is a spec token, never quoted
+            // spec tokens, never quoted
+            if Encoding.tokenKeys.contains(key) { return "\(key)=\(value)" }
             if Encoding.specKeys.contains(key) {
                 guard let text = value as? String else { return "\(key)=\(value)" }
                 return "\(key)=\"\(escape(text))\""
@@ -24,11 +25,14 @@ internal struct CmcdEncoder: ReportEncoder {
         }.joined(separator: ",")
     }
 
-    /// Custom values MUST be STRING or TOKEN (CTA-5004-B): booleans ride as
-    /// the bare tokens `true`/`false`; everything else — numbers included —
-    /// as a sanitized, truncated sf-string.
+    /// Custom values MUST be STRING or TOKEN (CTA-5004-B): booleans and
+    /// explicit tokens ride bare; ordinary strings and numbers use a
+    /// sanitized, truncated sf-string.
     private func customPair(_ key: String, _ value: Any) -> String {
         if let flag = value as? Bool { return "\(key)=\(flag ? "true" : "false")" }
+        if let token = value as? LensToken {
+            return "\(key)=\(token.value)"
+        }
         let text = Encoding.sanitizeAndTruncate(Encoding.numberText(value), maxUnits: 64)
         return "\(key)=\"\(escape(text))\""
     }

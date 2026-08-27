@@ -14,6 +14,8 @@ internal struct JsonEncoder: ReportEncoder {
             let encoded: String
             if let flag = value as? Bool {
                 encoded = flag ? "true" : "false"
+            } else if let token = value as? LensToken {
+                encoded = "\"\(escape(token.value))\""
             } else if let text = value as? String {
                 encoded = "\"\(escape(text))\""
             } else {

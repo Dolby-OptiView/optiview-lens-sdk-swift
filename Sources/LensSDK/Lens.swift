@@ -101,6 +101,15 @@ public enum Lens {
         private var disposed = false
         private var stopHeartbeat: (() -> Void)?
         private var heartbeatKeys: LensEventKeys?
+        private var sessionContentId: String?
+        private var streamingFormat: String?
+        private var streamType: String?
+
+        // The ad's `cid` while a §8.2.8 swap is open; cleared when the ad or break ends.
+        private var adContentId: String?
+
+        /// The ad events whose typed payload may carry the ad's content ID (§8.2.8).
+        private static let adCidEvents: Set<String> = ["as", "ae", "sk"]
 
         init(options: LensJoinOptions, backend: EffectiveBackend) {
             self.namespace = options.namespace
@@ -118,11 +127,33 @@ public enum Lens {
                 Lens.usageViolation("Lens: sessionId must be 1-64 printable ASCII characters")
                 return LensSession(sessionId: UUID().uuidString.lowercased())
             }
+            if let contentId = options.contentId,
+                !Validation.matches(contentId, Validation.contentIdPattern)
+            {
+                Lens.usageViolation("Lens: contentId must be 1-128 printable ASCII characters")
+                return LensSession(sessionId: UUID().uuidString.lowercased())
+            }
+            if let streamingFormat = options.streamingFormat,
+                !Validation.sfTokens.contains(streamingFormat)
+            {
+                Lens.usageViolation("Lens: streamingFormat must be one of 'd', 'h', 's', 'e', 'o'")
+                return LensSession(sessionId: UUID().uuidString.lowercased())
+            }
+            if let streamType = options.streamType, !Validation.stTokens.contains(streamType) {
+                Lens.usageViolation("Lens: streamType must be one of 'v', 'l', 'll'")
+                return LensSession(sessionId: UUID().uuidString.lowercased())
+            }
             lock.lock()
             defer { lock.unlock() }
             let session = LensSession(
                 sessionId: options.sessionId ?? UUID().uuidString.lowercased())
-            if !disposed { current = session }
+            if !disposed {
+                current = session
+                sessionContentId = options.contentId
+                streamingFormat = options.streamingFormat
+                streamType = options.streamType
+                adContentId = nil
+            }
             armHeartbeat()
             return session
         }
@@ -130,6 +161,10 @@ public enum Lens {
         func endSession() {
             lock.lock()
             current = nil
+            sessionContentId = nil
+            streamingFormat = nil
+            streamType = nil
+            adContentId = nil
             cancelHeartbeat()
             lock.unlock()
             transport.flush()
@@ -183,6 +218,10 @@ public enum Lens {
             lock.lock()
             disposed = true
             current = nil
+            sessionContentId = nil
+            streamingFormat = nil
+            streamType = nil
+            adContentId = nil
             cancelHeartbeat()
             lock.unlock()
             transport.dispose()
@@ -191,6 +230,13 @@ public enum Lens {
         private func dispatch(type: String, customName: String?, payload: (any LensEventPayload)?) {
             let (keys, drop) = Validation.checkedCustomKeys(payload?.custom, strict: strict)
             if drop { return }
+            var adCid: String?
+            if Handle.adCidEvents.contains(type) {
+                let (checked, dropEvent) = Validation.checkedContentId(
+                    (payload as? LensAdPayload)?.contentId, strict: strict)
+                if dropEvent { return }
+                adCid = checked
+            }
             lock.lock()
             defer { lock.unlock() }
             guard let session = current, !disposed, consent == .granted else { return }
@@ -200,9 +246,37 @@ public enum Lens {
                 namespace: namespace,
                 keys: keys,
                 timestamp: Lens.nowForTesting?() ?? Int64(Date().timeIntervalSince1970 * 1000),
-                session: session
+                session: session,
+                contentId: effectiveContentId(type: type, adCid: adCid),
+                streamingFormat: streamingFormat,
+                streamType: streamType
             )
             deliver(event, heartbeat: false)
+        }
+
+        /// The §8.2.8 `cid` sequence: an ad start opens a swap with its own
+        /// content ID — and always closes the previous one, so back-to-back
+        /// starts in a pod never label the new ad with the old ad's id. The
+        /// swap is also bounded by the ad's end/skip, the break's end, and
+        /// session end/roll — an unmatched start can never mislabel reports
+        /// past its break. `adEnd`/`adSkip` may carry their own ID
+        /// (out-of-order labeling) without re-opening a swap; `adBreakEnd` is
+        /// always the main content's. Callers hold `lock`.
+        private func effectiveContentId(type: String, adCid: String?) -> String? {
+            switch type {
+            case "as":
+                adContentId = adCid
+                return adCid ?? sessionContentId
+            case "ae", "sk":
+                let cid = adCid ?? adContentId ?? sessionContentId
+                adContentId = nil
+                return cid
+            case "abe":
+                adContentId = nil
+                return sessionContentId
+            default:
+                return adContentId ?? sessionContentId
+            }
         }
 
         /// The session's liveness report (`e=t`), one per tick, always in this
@@ -214,6 +288,8 @@ public enum Lens {
             defer { lock.unlock() }
             guard let session = current, !disposed, consent == .granted else { return }
             let keys = heartbeatKeys
+            // Always the session's cid — §8.2.8 shifts only the ad events, and a
+            // liveness stream that flips identity mid-break is worse to consume.
             deliver(
                 LensEvent(
                     type: "t",
@@ -221,7 +297,10 @@ public enum Lens {
                     namespace: namespace,
                     keys: keys,
                     timestamp: Lens.nowForTesting?() ?? Int64(Date().timeIntervalSince1970 * 1000),
-                    session: session
+                    session: session,
+                    contentId: sessionContentId,
+                    streamingFormat: streamingFormat,
+                    streamType: streamType
                 ),
                 heartbeat: true
             )

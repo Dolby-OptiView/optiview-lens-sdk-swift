@@ -10,12 +10,16 @@ import XCTest
 /// delivery-behavior contract: queue scoping, sequence numbers, flush
 /// boundaries, consent purge. Posts must match the web reference byte for byte.
 final class BehaviorTests: XCTestCase {
-    private let eventTypes: [String: LensEventType<LensPayload>] = [
-        "abs": .adBreakStart, "as": .adStart, "ae": .adEnd, "abe": .adBreakEnd, "sk": .adSkip,
+    private let adEventTypes: [String: LensEventType<LensAdPayload>] = [
+        "as": .adStart, "ae": .adEnd, "sk": .adSkip,
+    ]
+    private let plainEventTypes: [String: LensEventType<LensPayload>] = [
+        "abs": .adBreakStart, "abe": .adBreakEnd,
     ]
 
     override func tearDown() {
         TransportRuntime.postOverride = nil
+        EnvironmentRuntime.override = nil
         Lens.nowForTesting = nil
         TransportRuntime.resetSnRegistryForTesting()
         Lens.resetConfigurationForTesting()
@@ -51,6 +55,13 @@ final class BehaviorTests: XCTestCase {
         return LensPayload(custom: custom.mapValues(normalize))
     }
 
+    private func adPayload(_ step: [String: Any]) -> LensAdPayload {
+        LensAdPayload(
+            contentId: step["contentId"] as? String,
+            custom: (step["custom"] as? [String: Any])?.mapValues(normalize)
+        )
+    }
+
     func testReproducesTheBehaviorGoldensByteIdentically() throws {
         let fixtureUrl = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -77,6 +88,9 @@ final class BehaviorTests: XCTestCase {
                 case "clock":
                     let ms = (step["ms"] as! NSNumber).int64Value
                     Lens.nowForTesting = { ms }
+                case "env":
+                    EnvironmentRuntime.override = FixtureEnvironment.parse(
+                        step["environment"] as! [String: Any])
                 case "configure":
                     let backend = (step["backend"] as! String)
                     try Lens.configure(
@@ -94,12 +108,22 @@ final class BehaviorTests: XCTestCase {
                 case "startSession":
                     handles[step["handle"] as! String]!
                         .startSession(
-                            LensStartSessionOptions(sessionId: step["sessionId"] as? String))
+                            LensStartSessionOptions(
+                                sessionId: step["sessionId"] as? String,
+                                contentId: step["contentId"] as? String,
+                                streamingFormat: step["streamingFormat"] as? String,
+                                streamType: step["streamType"] as? String
+                            ))
                 case "endSession":
                     handles[step["handle"] as! String]!.endSession()
                 case "emit":
-                    handles[step["handle"] as! String]!
-                        .emit(eventTypes[step["type"] as! String]!, payload: payload(step))
+                    let handle = handles[step["handle"] as! String]!
+                    let type = step["type"] as! String
+                    if let ad = adEventTypes[type] {
+                        handle.emit(ad, payload: adPayload(step))
+                    } else {
+                        handle.emit(plainEventTypes[type]!, payload: payload(step))
+                    }
                 case "emitCustom":
                     handles[step["handle"] as! String]!
                         .emitCustom(step["name"] as! String, payload: payload(step))

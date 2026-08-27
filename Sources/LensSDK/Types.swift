@@ -125,9 +125,27 @@ public struct LensPayload: LensEventPayload {
     }
 }
 
+/// Payload for the ad events that carry content identity (CTA-5004-B §8.2.8):
+/// `adStart` swaps the session's `cid` for the ad's until the ad or its break
+/// ends; `adEnd`/`adSkip` may carry it to label themselves when arriving out
+/// of order — they never re-open a swap. Content-replacing break formats
+/// only: overlays are not an ad for `cid` purposes and must not feed this
+/// field.
+public struct LensAdPayload: LensEventPayload {
+    /// The ad's own content ID (1-128 printable ASCII), reported as `cid`.
+    public let contentId: String?
+    public let custom: LensEventKeys?
+
+    public init(contentId: String? = nil, custom: LensEventKeys? = nil) {
+        self.contentId = contentId
+        self.custom = custom
+    }
+}
+
 /// A standard CMCD (CTA-5004-B) event type token, carrying the payload type
 /// it accepts — grows additively as more of the spec is adopted. v0 carries
-/// the ad set (all free-form: `LensPayload`); anything not listed here goes
+/// the ad set (`LensPayload`, with `LensAdPayload` on the ad-identity
+/// events); anything not listed here goes
 /// through `emitCustom`. Wire codes are the spec values.
 public struct LensEventType<Payload: LensEventPayload> {
     public let wireCode: String
@@ -140,29 +158,56 @@ public struct LensEventType<Payload: LensEventPayload> {
 extension LensEventType where Payload == LensPayload {
     /// An ad break has started (wire: "abs").
     public static var adBreakStart: LensEventType<LensPayload> { .init("abs") }
-    /// An ad has started playing (wire: "as").
-    public static var adStart: LensEventType<LensPayload> { .init("as") }
-    /// An ad has ended (wire: "ae").
-    public static var adEnd: LensEventType<LensPayload> { .init("ae") }
     /// An ad break has ended (wire: "abe").
     public static var adBreakEnd: LensEventType<LensPayload> { .init("abe") }
-    /// An ad was skipped (wire: "sk").
-    public static var adSkip: LensEventType<LensPayload> { .init("sk") }
 }
 
-/// Event payload custom keys — CMCD value types (String, Number, Bool) only,
-/// so every key serializes cleanly. Short names everywhere the integrator and
-/// the backend look; the CMCD wire hop alone qualifies them with the
-/// reverse-DNS prefix (a transport artifact, stripped again on ingest).
-/// Registered CMCD key names fail at emit; non-token names are dropped.
+extension LensEventType where Payload == LensAdPayload {
+    /// An ad has started playing (wire: "as").
+    public static var adStart: LensEventType<LensAdPayload> { .init("as") }
+    /// An ad has ended (wire: "ae").
+    public static var adEnd: LensEventType<LensAdPayload> { .init("ae") }
+    /// An ad was skipped (wire: "sk").
+    public static var adSkip: LensEventType<LensAdPayload> { .init("sk") }
+}
+
+/// Marks a custom value that must be emitted as an unquoted structured-field
+/// token. The marker avoids inferring token-ness from ordinary enum strings.
+public struct LensToken {
+    public let value: String
+
+    public init(value: String) {
+        self.value = value
+    }
+}
+
+/// Event payload custom keys — CMCD value types (String, Number, Bool,
+/// LensToken). Short names everywhere the integrator and the backend look; the
+/// CMCD wire hop alone qualifies them with the reverse-DNS prefix (a transport
+/// artifact, stripped again on ingest). Registered CMCD key names fail at
+/// emit; invalid token values are dropped.
 public typealias LensEventKeys = [String: Any]
 
 public struct LensStartSessionOptions {
     /// Externally steered session id (e.g. injected by discovery); Lens generates a UUID when absent.
     public var sessionId: String?
+    /// The main content's ID (1-128 printable ASCII), stamped as `cid` on every report of the session.
+    public var contentId: String?
+    /// Streaming format (`sf`): "d" DASH, "h" HLS, "s" Smooth, "e" HESP, "o" other.
+    public var streamingFormat: String?
+    /// Stream type (`st`): "v" VOD, "l" live, "ll" low-latency live.
+    public var streamType: String?
 
-    public init(sessionId: String? = nil) {
+    public init(
+        sessionId: String? = nil,
+        contentId: String? = nil,
+        streamingFormat: String? = nil,
+        streamType: String? = nil
+    ) {
         self.sessionId = sessionId
+        self.contentId = contentId
+        self.streamingFormat = streamingFormat
+        self.streamType = streamType
     }
 }
 
@@ -250,10 +295,17 @@ public struct LensEvent {
     /// Epoch milliseconds.
     public let timestamp: Int64
     public let session: LensSession
+    /// The effective content ID (`cid`) at emit time — the ad's during a swap, the session's otherwise.
+    public let contentId: String?
+    /// Streaming format (`sf`), from the session.
+    public let streamingFormat: String?
+    /// Stream type (`st`), from the session.
+    public let streamType: String?
 
     internal init(
         type: String, customName: String?, namespace: String, keys: LensEventKeys?,
-        timestamp: Int64, session: LensSession
+        timestamp: Int64, session: LensSession,
+        contentId: String? = nil, streamingFormat: String? = nil, streamType: String? = nil
     ) {
         self.type = type
         self.customName = customName
@@ -261,6 +313,9 @@ public struct LensEvent {
         self.keys = keys
         self.timestamp = timestamp
         self.session = session
+        self.contentId = contentId
+        self.streamingFormat = streamingFormat
+        self.streamType = streamType
     }
 }
 

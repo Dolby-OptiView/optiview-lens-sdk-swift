@@ -123,6 +123,7 @@ final class TransportTests: XCTestCase {
         for fixture in cases {
             let name = fixture["name"] as! String
             var counters: [String: Int] = [:]
+            let environment = FixtureEnvironment.parse(fixture["environment"] as! [String: Any])
             let events = fixture["events"] as! [[String: Any]]
             let reports = events.map { raw -> [(String, Any)] in
                 let session = raw["session"] as! [String: Any]
@@ -138,9 +139,12 @@ final class TransportTests: XCTestCase {
                     namespace: raw["namespace"] as! String,
                     keys: keys,
                     timestamp: (raw["timestamp"] as! NSNumber).int64Value,
-                    session: LensSession(sessionId: sid)
+                    session: LensSession(sessionId: sid),
+                    contentId: raw["contentId"] as? String,
+                    streamingFormat: raw["streamingFormat"] as? String,
+                    streamType: raw["streamType"] as? String
                 )
-                return Encoding.toReport(event, sn)
+                return Encoding.toReport(event, sn, environment)
             }
             let format: LensFormat = (fixture["format"] as! String) == "json" ? .json : .cmcd
             let (body, contentType) = Encoding.encodeBody(format, reports)
@@ -169,6 +173,19 @@ final class TransportTests: XCTestCase {
         let cmcd = Encoding.encodeBody(.cmcd, [report]).body
         XCTAssertTrue(cmcd.contains("com.dolby.optiview-weight=\"2\""))
         XCTAssertTrue(cmcd.contains("com.dolby.optiview-ratio=\"2.5\""))
+    }
+
+    func testExplicitCustomTokensAreBareInCmcdAndStringsInJson() {
+        let report: [(String, Any)] = [
+            ("e", "ae"), ("ts", Int64(1)), ("sid", "s"), ("sn", 1), ("v", 2), ("ns", "ads"),
+            ("ader", LensToken(value: "c")),
+        ]
+        let json = Encoding.encodeBody(.json, [report]).body
+        XCTAssertTrue(json.contains("\"ader\":\"c\""))
+        XCTAssertFalse(json.contains("\"ader\":{\"value\":\"c\"}"))
+        let cmcd = Encoding.encodeBody(.cmcd, [report]).body
+        XCTAssertTrue(cmcd.contains("com.dolby.optiview-ader=c"))
+        XCTAssertFalse(cmcd.contains("com.dolby.optiview-ader=\"c\""))
     }
 
     // MARK: delivery behavior
@@ -203,7 +220,7 @@ final class TransportTests: XCTestCase {
     func testDeliversToTheBuiltInIngestWithThePrefixOnTheWire() throws {
         let lens = try Lens.join(LensJoinOptions(namespace: "ads"))
         lens.startSession()
-        lens.emit(.adStart, payload: LensPayload(custom: ["ad": "ad-1"]))
+        lens.emit(.adStart, payload: LensAdPayload(custom: ["ad": "ad-1"]))
         lens.endSession()
 
         let requests = waitForRequests(1, path: "/ingest")

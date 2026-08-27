@@ -145,7 +145,7 @@ final class LensTests: XCTestCase {
         let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
         lens.startSession()
         let before = Int64(Date().timeIntervalSince1970 * 1000)
-        lens.emit(.adStart, payload: LensPayload(custom: ["ad": "ad-1"]))
+        lens.emit(.adStart, payload: LensAdPayload(custom: ["ad": "ad-1"]))
         XCTAssertEqual(delivered.count, 1)
         let event = try XCTUnwrap(delivered.first).event
         XCTAssertEqual(event.type, "as")
@@ -169,11 +169,26 @@ final class LensTests: XCTestCase {
         let lens = try Lens.join(
             LensJoinOptions(namespace: "ads", destinations: [ingest], strict: true))
         lens.startSession()
-        lens.emit(.adStart, payload: LensPayload(custom: ["sid": "x"]))
+        lens.emit(.adStart, payload: LensAdPayload(custom: ["sid": "x"]))
         lens.emitCustom("adBreakAdded", payload: LensPayload(custom: ["pt": 3]))
-        lens.emit(.adStart, payload: LensPayload(custom: ["ns": "live"]))
+        lens.emit(.adStart, payload: LensAdPayload(custom: ["ns": "live"]))
         XCTAssertEqual(violations().count, 3)
         XCTAssertTrue(violations().allSatisfy { $0.contains("registered CMCD key") })
+        XCTAssertEqual(delivered.count, 0)
+    }
+
+    func testFailsOnTheEnvironmentKeysLensStampsItself() throws {
+        captureSink()
+        let violations = captureViolations()
+        defer { Lens.usageViolation = { preconditionFailure($0) } }
+        let lens = try Lens.join(
+            LensJoinOptions(namespace: "ads", destinations: [ingest], strict: true))
+        lens.startSession()
+        for key in EnvironmentRuntime.environmentKeys {
+            lens.emit(.adStart, payload: LensAdPayload(custom: [key: "x"]))
+        }
+        XCTAssertEqual(violations().count, EnvironmentRuntime.environmentKeys.count)
+        XCTAssertTrue(violations().allSatisfy { $0.contains("reserved for Lens") })
         XCTAssertEqual(delivered.count, 0)
     }
 
@@ -184,15 +199,53 @@ final class LensTests: XCTestCase {
         let lens = try Lens.join(
             LensJoinOptions(namespace: "ads", destinations: [ingest], strict: true))
         lens.startSession()
-        lens.emit(.adStart, payload: LensPayload(custom: ["ad_1": "x"]))
-        lens.emit(.adStart, payload: LensPayload(custom: ["adBreak": "x"]))
-        lens.emit(.adStart, payload: LensPayload(custom: [String(repeating: "k", count: 46): "x"]))
+        lens.emit(.adStart, payload: LensAdPayload(custom: ["ad_1": "x"]))
+        lens.emit(.adStart, payload: LensAdPayload(custom: ["adBreak": "x"]))
+        lens.emit(
+            .adStart, payload: LensAdPayload(custom: [String(repeating: "k", count: 46): "x"]))
         XCTAssertEqual(violations().count, 3)
         XCTAssertTrue(violations()[0].contains("invalid custom key"))
         XCTAssertTrue(violations()[2].contains("exceeds 45 characters"))
         XCTAssertEqual(delivered.count, 0)
-        lens.emit(.adStart, payload: LensPayload(custom: ["ad-1": "ok"]))
+        lens.emit(.adStart, payload: LensAdPayload(custom: ["ad-1": "ok"]))
         XCTAssertEqual(delivered.first?.event.keys?["ad-1"] as? String, "ok")
+    }
+
+    func testDropsInvalidCustomTokenValuesByDefaultAndFailsInStrictMode() throws {
+        captureSink()
+        let invalid = [
+            LensToken(value: "1c"),
+            LensToken(value: ""),
+            LensToken(value: "a\nb"),
+            LensToken(value: "c\n"),
+            LensToken(value: "c\r\n"),
+            LensToken(value: "ab\r"),
+            LensToken(value: "c\""),
+            LensToken(value: String(repeating: "c", count: 65)),
+        ]
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
+        lens.startSession()
+        for (index, value) in invalid.enumerated() {
+            lens.emit(
+                .adStart,
+                payload: LensAdPayload(custom: ["bad-\(index)": value, "good": "ok"]))
+        }
+        XCTAssertEqual(delivered.count, invalid.count)
+        XCTAssertTrue(
+            delivered.allSatisfy {
+                $0.event.keys?.count == 1 && $0.event.keys?["good"] as? String == "ok"
+            })
+
+        let violations = captureViolations()
+        defer { Lens.usageViolation = { preconditionFailure($0) } }
+        let strict = try Lens.join(
+            LensJoinOptions(namespace: "strict-ads", destinations: [ingest], strict: true))
+        strict.startSession()
+        for value in invalid {
+            strict.emit(.adStart, payload: LensAdPayload(custom: ["ader": value]))
+        }
+        XCTAssertEqual(violations().count, invalid.count)
+        XCTAssertTrue(violations().allSatisfy { $0.contains("custom token value") })
     }
 
     func testRejectsInvalidCustomEventNamesLoudly() throws {
@@ -214,7 +267,7 @@ final class LensTests: XCTestCase {
         captureSink()
         let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
         lens.startSession()
-        lens.emit(.adStart, payload: LensPayload(custom: ["ad_1": "nope", "ad": "ad-1"]))
+        lens.emit(.adStart, payload: LensAdPayload(custom: ["ad_1": "nope", "ad": "ad-1"]))
         lens.emitCustom("com.example.bad")
         XCTAssertEqual(delivered.count, 1)
         XCTAssertEqual(delivered.first?.event.keys?.count, 1)
@@ -231,6 +284,163 @@ final class LensTests: XCTestCase {
         lens.startSession(LensStartSessionOptions(sessionId: "bad\nsid"))
         lens.startSession(LensStartSessionOptions(sessionId: String(repeating: "s", count: 65)))
         XCTAssertEqual(violations().count, 2)
+    }
+
+    // MARK: content identity
+
+    private func startWithContent(_ lens: LensHandle) -> LensSession {
+        lens.startSession(
+            LensStartSessionOptions(contentId: "movie-1", streamingFormat: "h", streamType: "v"))
+    }
+
+    func testStampsSessionContentIdentityOnEveryReport() throws {
+        captureSink()
+        captureTickers()
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
+        _ = startWithContent(lens)
+        lens.emit(.adBreakStart)
+        running[0].tick()
+        XCTAssertEqual(delivered.count, 2)
+        for delivery in delivered {
+            XCTAssertEqual(delivery.event.contentId, "movie-1")
+            XCTAssertEqual(delivery.event.streamingFormat, "h")
+            XCTAssertEqual(delivery.event.streamType, "v")
+        }
+    }
+
+    func testFollowsTheAdContentIdentitySequence() throws {
+        captureSink()
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
+        _ = startWithContent(lens)
+        lens.emit(.adBreakStart)
+        lens.emit(.adStart, payload: LensAdPayload(contentId: "ad-1"))
+        lens.emit(.adEnd)
+        lens.emit(.adStart, payload: LensAdPayload(contentId: "ad-2"))
+        lens.emit(.adSkip)
+        lens.emit(.adBreakEnd)
+        XCTAssertEqual(
+            delivered.map { $0.event.contentId },
+            ["movie-1", "ad-1", "ad-1", "ad-2", "ad-2", "movie-1"])
+        XCTAssertTrue(delivered.allSatisfy { $0.event.streamingFormat == "h" })
+        XCTAssertTrue(delivered.allSatisfy { $0.event.streamType == "v" })
+    }
+
+    func testGenericEventsInsideAnOpenAdSwapCarryTheAdId() throws {
+        captureSink()
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
+        _ = startWithContent(lens)
+        lens.emit(.adStart, payload: LensAdPayload(contentId: "ad-1"))
+        lens.emitCustom("quartile")
+        lens.emit(.adEnd)
+        lens.emitCustom("betweenAds")
+        XCTAssertEqual(
+            delivered.map { $0.event.contentId }, ["ad-1", "ad-1", "ad-1", "movie-1"])
+    }
+
+    func testHeartbeatsAlwaysCarryTheSessionContentId() throws {
+        captureSink()
+        captureTickers()
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
+        _ = startWithContent(lens)
+        lens.emit(.adStart, payload: LensAdPayload(contentId: "ad-1"))
+        running[0].tick()
+        XCTAssertEqual(delivered.last?.event.type, "t")
+        XCTAssertEqual(delivered.last?.event.contentId, "movie-1")
+    }
+
+    func testAnUnmatchedAdStartIsBoundedByTheBreakEnd() throws {
+        captureSink()
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
+        _ = startWithContent(lens)
+        lens.emit(.adStart, payload: LensAdPayload(contentId: "ad-1"))
+        lens.emit(.adBreakEnd)
+        lens.emitCustom("afterBreak")
+        XCTAssertEqual(
+            delivered.map { $0.event.contentId }, ["ad-1", "movie-1", "movie-1"])
+    }
+
+    func testASessionRollClearsAnOpenAdSwap() throws {
+        captureSink()
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
+        _ = startWithContent(lens)
+        lens.emit(.adStart, payload: LensAdPayload(contentId: "ad-1"))
+        _ = startWithContent(lens)
+        lens.emitCustom("afterRoll")
+        XCTAssertEqual(delivered.last?.event.contentId, "movie-1")
+    }
+
+    func testEveryAdStartReplacesTheSwapAndNeverInheritsTheLastAd() throws {
+        captureSink()
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
+        _ = startWithContent(lens)
+        lens.emit(.adStart, payload: LensAdPayload(contentId: "ad-1"))
+        lens.emit(.adStart, payload: LensAdPayload(contentId: "ad-2"))  // back-to-back in a pod
+        lens.emit(.adStart)  // no id — falls back to the session's
+        lens.emit(.adEnd)
+        XCTAssertEqual(
+            delivered.map { $0.event.contentId }, ["ad-1", "ad-2", "movie-1", "movie-1"])
+    }
+
+    func testAClosingEventsOwnIdLabelsItWithoutReopeningASwap() throws {
+        captureSink()
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
+        _ = startWithContent(lens)
+        lens.emit(.adEnd, payload: LensAdPayload(contentId: "ad-late"))
+        lens.emitCustom("afterLateEnd")
+        XCTAssertEqual(
+            delivered.map { $0.event.contentId }, ["ad-late", "movie-1"])
+    }
+
+    func testTheSidNeverRollsBecauseOfAContentIdChange() throws {
+        captureSink()
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
+        let session = startWithContent(lens)
+        lens.emit(.adStart, payload: LensAdPayload(contentId: "ad-1"))
+        lens.emit(.adEnd)
+        XCTAssertTrue(delivered.allSatisfy { $0.event.session.sessionId == session.sessionId })
+    }
+
+    func testOmittedContentIdentityStaysAbsent() throws {
+        captureSink()
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
+        lens.startSession()
+        lens.emit(.adStart)
+        XCTAssertNil(delivered.first?.event.contentId)
+        XCTAssertNil(delivered.first?.event.streamingFormat)
+        XCTAssertNil(delivered.first?.event.streamType)
+    }
+
+    func testContentIdentitySetupProblemsAlwaysFail() throws {
+        let violations = captureViolations()
+        defer { Lens.usageViolation = { preconditionFailure($0) } }
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads"))
+        lens.startSession(
+            LensStartSessionOptions(contentId: String(repeating: "c", count: 129)))
+        lens.startSession(LensStartSessionOptions(contentId: "bad\ncid"))
+        lens.startSession(LensStartSessionOptions(streamingFormat: "x"))
+        lens.startSession(LensStartSessionOptions(streamType: "x"))
+        XCTAssertEqual(violations().count, 4)
+    }
+
+    func testStrictModeFailsOnAnInvalidAdContentId() throws {
+        captureSink()
+        let violations = captureViolations()
+        defer { Lens.usageViolation = { preconditionFailure($0) } }
+        let lens = try Lens.join(
+            LensJoinOptions(namespace: "ads", destinations: [ingest], strict: true))
+        _ = startWithContent(lens)
+        lens.emit(.adStart, payload: LensAdPayload(contentId: "bad\ncid"))
+        XCTAssertEqual(violations().count, 1)
+        XCTAssertEqual(delivered.count, 0)
+    }
+
+    func testDefaultModeDropsAnInvalidAdContentIdButSendsTheEvent() throws {
+        captureSink()
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
+        _ = startWithContent(lens)
+        lens.emit(.adStart, payload: LensAdPayload(contentId: "bad\ncid"))
+        XCTAssertEqual(delivered.count, 1)
+        XCTAssertEqual(delivered.first?.event.contentId, "movie-1")
     }
 
     func testLowersCustomEventsToCeWithTheCustomName() throws {

@@ -9,7 +9,10 @@ internal protocol ReportEncoder {
 
 internal enum Encoding {
     /// The spec keys Lens stamps; everything else in a report is a custom key.
-    static let specKeys: Set<String> = ["e", "cen", "ts", "sid", "sn", "v"]
+    static let specKeys: Set<String> = ["e", "cen", "ts", "sid", "sn", "v", "cid", "sf", "st"]
+
+    /// Spec keys whose values are spec tokens, never quoted on the CMCD wire.
+    static let tokenKeys: Set<String> = ["e", "sf", "st"]
 
     static let wirePrefix = "com.dolby.optiview-"
 
@@ -40,16 +43,31 @@ internal enum Encoding {
         return "\(value)"
     }
 
-    /// The flat report: spec keys + short custom names, sorted — the fixed golden order.
-    static func toReport(_ event: LensEvent, _ sn: Int) -> [(String, Any)] {
+    /// The flat report: spec keys, the environment stamp, then short custom
+    /// names, sorted — the fixed golden order. The environment arrives as an
+    /// argument so a fixture can supply it and the host never leaks into a
+    /// golden.
+    static func toReport(_ event: LensEvent, _ sn: Int, _ environment: LensEnvironment)
+        -> [(String, Any)]
+    {
         var report: [(String, Any)] = [("e", event.type)]
         if let cen = event.customName { report.append(("cen", cen)) }
         report.append(("ts", event.timestamp))
         report.append(("sid", event.session.sessionId))
+        if let cid = event.contentId { report.append(("cid", cid)) }
+        if let sf = event.streamingFormat { report.append(("sf", sf)) }
+        if let st = event.streamType { report.append(("st", st)) }
         report.append(("sn", sn))
         // event mode is v2; request mode will use v1 syntax — never share this builder
         report.append(("v", 2))
         report.append(("ns", event.namespace))
+        // Sorted, and only what is known — an unknown value is omitted, never a placeholder.
+        if let bn = environment.bn { report.append(("bn", bn)) }
+        if let bv = environment.bv { report.append(("bv", bv)) }
+        if let dc = environment.dc { report.append(("dc", dc)) }
+        if let os = environment.os { report.append(("os", os)) }
+        if let osv = environment.osv { report.append(("osv", osv)) }
+        report.append(("p", environment.p))
         if let keys = event.keys {
             for key in keys.keys.sorted() { report.append((key, keys[key]!)) }
         }
