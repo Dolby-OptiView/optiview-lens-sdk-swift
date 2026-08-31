@@ -20,6 +20,12 @@ internal struct LensEnvironment {
 internal enum EnvironmentRuntime {
     /// The keys Lens stamps from the environment — reserved against integrator custom keys.
     static let environmentKeys = ["bn", "bv", "dc", "os", "osv", "p"]
+    static let deviceClasses = (
+        desktop: "desktop",
+        mobile: "mobile",
+        tablet: "tablet",
+        tv: "tv"
+    )
 
     /// Resolved once per process — none of it changes while the app lives.
     private static let detected: LensEnvironment = detect()
@@ -45,12 +51,12 @@ internal enum EnvironmentRuntime {
             environment.os = device.systemName
             environment.osv = device.systemVersion
             switch device.userInterfaceIdiom {
-            case .phone: environment.dc = "mobile"
-            case .pad: environment.dc = "tablet"
-            case .tv: environment.dc = "tv"
+            case .phone: environment.dc = deviceClasses.mobile
+            case .pad: environment.dc = deviceClasses.tablet
+            case .tv: environment.dc = deviceClasses.tv
             default:
                 if #available(iOS 14.0, tvOS 14.0, *), device.userInterfaceIdiom == .mac {
-                    environment.dc = "desktop"
+                    environment.dc = deviceClasses.desktop
                 }
             }
         #endif

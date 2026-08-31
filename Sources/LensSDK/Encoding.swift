@@ -17,6 +17,18 @@ internal enum Encoding {
     /// Lens-owned keys whose values are spec token vocabularies — bare on the CMCD wire.
     static let lensTokenKeys: Set<String> = ["p", "dc"]
 
+    /// A token value travels as the registry's abbreviation, which ingest
+    /// expands back to the full value (spec §2, §4.2). Mirrors `values` in
+    /// `registry/keys/lens.json`, inverted; the vocabulary suite pins it there.
+    static let tokenAbbreviations: [String: [String: String]] = [
+        "p": ["web": "w", "android": "a", "ios": "i", "tvos": "tv"],
+        "dc": ["desktop": "d", "mobile": "m", "tablet": "t", "tv": "tv"],
+    ]
+
+    private static func abbreviate(_ key: String, _ value: String) -> String {
+        tokenAbbreviations[key]?[value] ?? value
+    }
+
     static let wirePrefix = "com.dolby.optiview-"
 
     /// Replace control characters (they can't ride a structured field and
@@ -69,10 +81,10 @@ internal enum Encoding {
         // Sorted, and only what is known — an unknown value is omitted, never a placeholder.
         if let bn = environment.bn { report.append(("bn", bn)) }
         if let bv = environment.bv { report.append(("bv", bv)) }
-        if let dc = environment.dc { report.append(("dc", dc)) }
+        if let dc = environment.dc { report.append(("dc", abbreviate("dc", dc))) }
         if let os = environment.os { report.append(("os", os)) }
         if let osv = environment.osv { report.append(("osv", osv)) }
-        report.append(("p", environment.p))
+        report.append(("p", abbreviate("p", environment.p)))
         report.append(("u", userId))
         if let keys = event.keys {
             for key in keys.keys.sorted() { report.append((key, keys[key]!)) }
