@@ -193,9 +193,11 @@ internal final class Transport {
             ? (TransportRuntime.ingestOverride ?? queue.destination.url)
             : queue.destination.url
         let environment = EnvironmentRuntime.current()
+        let userId = UserIdRuntime.currentUserId()
         let reports = events.map {
             Encoding.toReport(
-                $0, TransportRuntime.nextSn(url: url, sessionId: $0.session.sessionId), environment)
+                $0, TransportRuntime.nextSn(url: url, sessionId: $0.session.sessionId),
+                environment, userId)
         }
         let (body, contentType) = Encoding.encodeBody(queue.destination.format, reports)
         if let postOverride = TransportRuntime.postOverride {

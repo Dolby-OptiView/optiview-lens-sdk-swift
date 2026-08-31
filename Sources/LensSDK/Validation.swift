@@ -13,12 +13,12 @@ internal enum Validation {
         "tpb", "ts", "ttfb", "ttfbb", "ttlb", "url", "v",
     ]
 
-    /// Lens's own environment stamp (docs/internals.md) — Lens-owned, like "ns".
-    static let lensReserved = Set(EnvironmentRuntime.environmentKeys)
+    /// Keys Lens stamps itself — the environment plus the user ID (docs/internals.md).
+    static let lensReserved = Set(EnvironmentRuntime.environmentKeys + ["u"])
 
     /// Custom key names: lowercase-letter-first tokens within the wire-key budget
     /// (docs/internals.md).
-    static let keyPattern = "^[a-z][a-z0-9-]*$"
+    static let keyPattern = "^[a-z][a-z0-9_]*$"
     // Becomes per-producer when customer prefixes land (#14).
     static let keyMax = 64 - Encoding.wirePrefix.count
 
@@ -83,10 +83,10 @@ internal enum Validation {
             if cmcdReserved.contains(key) {
                 problem = "Lens: '\(key)' is a registered CMCD key and cannot be a custom key"
             } else if lensReserved.contains(key) {
-                problem = "Lens: '\(key)' is reserved for Lens's environment reporting"
+                problem = "Lens: '\(key)' is a Lens-owned key and cannot be a custom key"
             } else if !matches(key, keyPattern) {
                 problem =
-                    "Lens: invalid custom key '\(key)' — lowercase letter first, then lowercase letters, digits, hyphens"
+                    "Lens: invalid custom key '\(key)' — lowercase letter first, then lowercase letters, digits, underscores"
             } else if key.count > keyMax {
                 problem =
                     "Lens: custom key '\(key)' exceeds \(keyMax) characters (the spec's 64 minus the wire prefix)"

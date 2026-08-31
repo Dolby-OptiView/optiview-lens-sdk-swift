@@ -85,6 +85,13 @@ public protocol LensHandle: AnyObject {
     /// liveness report. Sets state only — it never sends and never shifts the
     /// cadence. The payload's top level is Lens's; `custom` is yours.
     func setHeartbeatPayload(_ payload: LensPayload?)
+    /// Change the liveness cadence on a live handle — faster during an ad
+    /// break, slower in the background. Same rule as `heartbeatMs` at join:
+    /// `0` is off, anything else is at least 1000 milliseconds. A new cadence
+    /// opens with a report and runs from there, the way a session's does; `0`
+    /// stops without one, and re-setting the interval already in force does
+    /// nothing.
+    func setHeartbeatInterval(_ ms: Int64)
     func setConsent(_ consent: LensConsent)
     func dispose()
 }
@@ -169,6 +176,19 @@ extension LensEventType where Payload == LensAdPayload {
     public static var adEnd: LensEventType<LensAdPayload> { .init("ae") }
     /// An ad was skipped (wire: "sk").
     public static var adSkip: LensEventType<LensAdPayload> { .init("sk") }
+}
+
+/// Swift cannot reflect over the static token extensions above, so the
+/// vocabulary conformance test reads this list instead. Keep it in step with
+/// the declarations; the cross-platform vocabulary names are the map keys.
+internal enum LensEventVocabulary {
+    static let declaredTokens: [String: String] = [
+        "AD_BREAK_START": LensEventType<LensPayload>.adBreakStart.wireCode,
+        "AD_START": LensEventType<LensAdPayload>.adStart.wireCode,
+        "AD_END": LensEventType<LensAdPayload>.adEnd.wireCode,
+        "AD_BREAK_END": LensEventType<LensPayload>.adBreakEnd.wireCode,
+        "AD_SKIP": LensEventType<LensAdPayload>.adSkip.wireCode,
+    ]
 }
 
 /// Marks a custom value that must be emitted as an unquoted structured-field

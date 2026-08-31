@@ -124,6 +124,7 @@ final class TransportTests: XCTestCase {
             let name = fixture["name"] as! String
             var counters: [String: Int] = [:]
             let environment = FixtureEnvironment.parse(fixture["environment"] as! [String: Any])
+            let userId = fixture["userId"] as! String
             let events = fixture["events"] as! [[String: Any]]
             let reports = events.map { raw -> [(String, Any)] in
                 let session = raw["session"] as! [String: Any]
@@ -144,7 +145,7 @@ final class TransportTests: XCTestCase {
                     streamingFormat: raw["streamingFormat"] as? String,
                     streamType: raw["streamType"] as? String
                 )
-                return Encoding.toReport(event, sn, environment)
+                return Encoding.toReport(event, sn, environment, userId)
             }
             let format: LensFormat = (fixture["format"] as! String) == "json" ? .json : .cmcd
             let (body, contentType) = Encoding.encodeBody(format, reports)
@@ -196,7 +197,7 @@ final class TransportTests: XCTestCase {
         TransportRuntime.postOverride = { url, _, _ in postedUrls.append(url) }
         let devUrl = "https://dev-ingest.test/events"
         try Lens.useDevelopmentBackend(url: devUrl)
-        let lens = try Lens.join(LensJoinOptions(namespace: "ads"))
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
         lens.startSession()
         lens.emit(.adStart)
         lens.endSession()
@@ -209,7 +210,7 @@ final class TransportTests: XCTestCase {
         TransportRuntime.ingestOverride = nil
         TransportRuntime.postOverride = { url, _, _ in postedUrls.append(url) }
         try Lens.configure(LensConfigureOptions(backend: .disabled))
-        let lens = try Lens.join(LensJoinOptions(namespace: "ads"))
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
         lens.startSession()
         lens.emit(.adStart)
         lens.endSession()
@@ -218,7 +219,7 @@ final class TransportTests: XCTestCase {
     }
 
     func testDeliversToTheBuiltInIngestWithThePrefixOnTheWire() throws {
-        let lens = try Lens.join(LensJoinOptions(namespace: "ads"))
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
         lens.startSession()
         lens.emit(.adStart, payload: LensAdPayload(custom: ["ad": "ad-1"]))
         lens.endSession()
@@ -274,7 +275,7 @@ final class TransportTests: XCTestCase {
     }
 
     func testNumbersReportsPerDestinationAndRestartsSnWhenTheSessionRolls() throws {
-        let lens = try Lens.join(LensJoinOptions(namespace: "ads"))
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
         lens.startSession()
         lens.emit(.adStart)
         lens.emit(.adEnd)
@@ -293,7 +294,7 @@ final class TransportTests: XCTestCase {
 
     func testRetriesAFailedPostOnce() throws {
         ReceiverProtocol.failFirst = 1
-        let lens = try Lens.join(LensJoinOptions(namespace: "ads"))
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
         lens.startSession()
         lens.emit(.adStart)
         lens.endSession()

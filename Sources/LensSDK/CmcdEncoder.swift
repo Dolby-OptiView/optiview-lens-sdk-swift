@@ -12,15 +12,23 @@ internal struct CmcdEncoder: ReportEncoder {
     private func encodeReport(_ report: [(String, Any)]) -> String {
         let wire =
             report
-            .map { (Encoding.specKeys.contains($0.0) ? $0.0 : Encoding.wirePrefix + $0.0, $0.1) }
-            .sorted { $0.0 < $1.0 }
-        return wire.map { key, value -> String in
+            .map {
+                (
+                    short: $0.0,
+                    key: Encoding.specKeys.contains($0.0) ? $0.0 : Encoding.wirePrefix + $0.0,
+                    value: $0.1
+                )
+            }
+            .sorted { $0.key < $1.key }
+        return wire.map { short, key, value -> String in
             // spec tokens, never quoted
             if Encoding.tokenKeys.contains(key) { return "\(key)=\(value)" }
             if Encoding.specKeys.contains(key) {
                 guard let text = value as? String else { return "\(key)=\(value)" }
                 return "\(key)=\"\(escape(text))\""
             }
+            // Lens-owned token vocabularies ride bare too
+            if Encoding.lensTokenKeys.contains(short) { return "\(key)=\(value)" }
             return customPair(key, value)
         }.joined(separator: ",")
     }

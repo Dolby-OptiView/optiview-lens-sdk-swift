@@ -95,7 +95,7 @@ public enum Lens {
         private let namespace: String
         private let strict: Bool
         private let transport: Transport
-        private let heartbeatMs: Int64
+        private var heartbeatMs: Int64
         private var consent: LensConsent
         private var current: LensSession?
         private var disposed = false
@@ -197,6 +197,20 @@ public enum Lens {
             heartbeatKeys = checked
         }
 
+        func setHeartbeatInterval(_ ms: Int64) {
+            guard ms == 0 || ms >= Validation.minHeartbeatMs else {
+                Lens.usageViolation(
+                    "Lens: heartbeatMs must be 0 (off) or at least \(Validation.minHeartbeatMs) milliseconds"
+                )
+                return
+            }
+            lock.lock()
+            defer { lock.unlock() }
+            guard !disposed, ms != heartbeatMs else { return }
+            heartbeatMs = ms
+            armHeartbeat()
+        }
+
         func setConsent(_ consent: LensConsent) {
             lock.lock()
             guard !disposed else {
@@ -211,7 +225,10 @@ public enum Lens {
             // Denial silences the cadence rather than ticking into a drop.
             armHeartbeat()
             lock.unlock()
-            if consent == .denied { transport.purge() }
+            if consent == .denied {
+                transport.purge()
+                UserIdRuntime.clear()
+            }
         }
 
         func dispose() {
@@ -286,6 +303,11 @@ public enum Lens {
         private func heartbeat() {
             lock.lock()
             defer { lock.unlock() }
+            emitHeartbeat()
+        }
+
+        // Callers hold `lock`.
+        private func emitHeartbeat() {
             guard let session = current, !disposed, consent == .granted else { return }
             let keys = heartbeatKeys
             // Always the session's cid — §8.2.8 shifts only the ad events, and a
@@ -324,12 +346,17 @@ public enum Lens {
             }
         }
 
-        /// One timer at a time, and only while a consenting session is live.
+        /// One timer at a time, and only while a consenting session is live. A
+        /// cadence opens with a report, the way CTA-5004-B §8.2.2's interval
+        /// stream starts at the session's first moment: a receiver hears the
+        /// session immediately, and a cadence change never leaves a gap longer
+        /// than the interval it replaced.
         /// Callers hold `lock`.
         private func armHeartbeat() {
             cancelHeartbeat()
             guard !disposed, current != nil, consent == .granted, heartbeatMs != 0 else { return }
             stopHeartbeat = Lens.ticker(heartbeatMs) { [weak self] in self?.heartbeat() }
+            emitHeartbeat()
         }
 
         // Callers hold `lock`.

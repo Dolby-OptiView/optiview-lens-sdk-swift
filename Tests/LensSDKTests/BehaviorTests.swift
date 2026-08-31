@@ -21,6 +21,7 @@ final class BehaviorTests: XCTestCase {
         TransportRuntime.postOverride = nil
         EnvironmentRuntime.override = nil
         Lens.nowForTesting = nil
+        UserIdRuntime.resetForTesting()
         TransportRuntime.resetSnRegistryForTesting()
         Lens.resetConfigurationForTesting()
         super.tearDown()
@@ -91,6 +92,8 @@ final class BehaviorTests: XCTestCase {
                 case "env":
                     EnvironmentRuntime.override = FixtureEnvironment.parse(
                         step["environment"] as! [String: Any])
+                case "user":
+                    UserIdRuntime.override = (step["userId"] as! String)
                 case "configure":
                     let backend = (step["backend"] as! String)
                     try Lens.configure(

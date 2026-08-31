@@ -14,6 +14,9 @@ internal enum Encoding {
     /// Spec keys whose values are spec tokens, never quoted on the CMCD wire.
     static let tokenKeys: Set<String> = ["e", "sf", "st"]
 
+    /// Lens-owned keys whose values are spec token vocabularies — bare on the CMCD wire.
+    static let lensTokenKeys: Set<String> = ["p", "dc"]
+
     static let wirePrefix = "com.dolby.optiview-"
 
     /// Replace control characters (they can't ride a structured field and
@@ -43,11 +46,13 @@ internal enum Encoding {
         return "\(value)"
     }
 
-    /// The flat report: spec keys, the environment stamp, then short custom
-    /// names, sorted — the fixed golden order. The environment arrives as an
-    /// argument so a fixture can supply it and the host never leaks into a
-    /// golden.
-    static func toReport(_ event: LensEvent, _ sn: Int, _ environment: LensEnvironment)
+    /// The flat report: spec keys, the environment stamp, the user ID, then
+    /// short custom names, sorted — the fixed golden order. The environment
+    /// and user ID arrive as arguments so a fixture can supply them and the
+    /// host never leaks into a golden.
+    static func toReport(
+        _ event: LensEvent, _ sn: Int, _ environment: LensEnvironment, _ userId: String
+    )
         -> [(String, Any)]
     {
         var report: [(String, Any)] = [("e", event.type)]
@@ -68,6 +73,7 @@ internal enum Encoding {
         if let os = environment.os { report.append(("os", os)) }
         if let osv = environment.osv { report.append(("osv", osv)) }
         report.append(("p", environment.p))
+        report.append(("u", userId))
         if let keys = event.keys {
             for key in keys.keys.sorted() { report.append((key, keys[key]!)) }
         }
