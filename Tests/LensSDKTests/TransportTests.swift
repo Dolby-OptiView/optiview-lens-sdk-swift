@@ -17,14 +17,23 @@ final class ReceiverProtocol: URLProtocol {
         let body: String
     }
 
+    struct Scripted {
+        let status: Int
+        var headers: [String: String] = [:]
+    }
+
     nonisolated(unsafe) static var captured: [Captured] = []
     nonisolated(unsafe) static var failFirst = 0
+
+    /// Responses per path, in arrival order; exhausted, the receiver settles on 204.
+    nonisolated(unsafe) static var script: [String: [Scripted]] = [:]
     private static let stateLock = NSLock()
 
     static func reset() {
         stateLock.lock()
         captured = []
         failFirst = 0
+        script = [:]
         stateLock.unlock()
     }
 
@@ -49,12 +58,22 @@ final class ReceiverProtocol: URLProtocol {
                 contentType: request.value(forHTTPHeaderField: "Content-Type") ?? "",
                 body: body
             ))
-        let status = Self.failFirst > 0 ? 500 : 200
-        if Self.failFirst > 0 { Self.failFirst -= 1 }
+        let path = request.url?.path ?? "/"
+        // The real ingest answers 204 with no body — the happy path tests
+        // must accept exactly that.
+        var next = ReceiverProtocol.Scripted(status: 204)
+        if Self.failFirst > 0 {
+            Self.failFirst -= 1
+            next = ReceiverProtocol.Scripted(status: 500)
+        } else if var scripted = Self.script[path], !scripted.isEmpty {
+            next = scripted.removeFirst()
+            Self.script[path] = scripted
+        }
         Self.stateLock.unlock()
 
         let response = HTTPURLResponse(
-            url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: nil)!
+            url: request.url!, statusCode: next.status, httpVersion: "HTTP/1.1",
+            headerFields: next.headers)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocolDidFinishLoading(self)
     }
@@ -85,12 +104,14 @@ final class TransportTests: XCTestCase {
         URLProtocol.registerClass(ReceiverProtocol.self)
         ReceiverProtocol.reset()
         TransportRuntime.ingestOverride = "http://mock.lens/ingest"
+        TransportRuntime.backoffBaseMs = 20
     }
 
     override func tearDown() {
         TransportRuntime.ingestOverride = nil
         TransportRuntime.postOverride = nil
         TransportRuntime.resetSnRegistryForTesting()
+        TransportRuntime.resetDeliveryPolicyForTesting()
         Lens.resetConfigurationForTesting()
         URLProtocol.unregisterClass(ReceiverProtocol.self)
         super.tearDown()
@@ -157,6 +178,14 @@ final class TransportTests: XCTestCase {
 
     /// JSONSerialization gives NSNumber for both booleans and numbers — split them apart.
     private static func normalizeJsonValue(_ value: Any) -> Any {
+        if let sentinel = value as? [String: Any], let name = sentinel["$number"] as? String {
+            switch name {
+            case "NaN": return Double.nan
+            case "Infinity": return Double.infinity
+            case "-Infinity": return -Double.infinity
+            default: break
+            }
+        }
         guard let number = value as? NSNumber else { return value }
         if CFGetTypeID(number) == CFBooleanGetTypeID() { return number.boolValue }
         if number.doubleValue.truncatingRemainder(dividingBy: 1) == 0 { return number.intValue }
@@ -174,6 +203,40 @@ final class TransportTests: XCTestCase {
         let cmcd = Encoding.encodeBody(.cmcd, [report]).body
         XCTAssertTrue(cmcd.contains("com.dolby.optiview-weight=\"2\""))
         XCTAssertTrue(cmcd.contains("com.dolby.optiview-ratio=\"2.5\""))
+    }
+
+    func testNonFiniteNumbersAreAbsentFromBothFormats() {
+        let report = Encoding.toReport(
+            LensEvent(
+                type: "as", customName: nil, namespace: "ads",
+                keys: [
+                    "doubleNan": Double.nan, "doubleInfinity": Double.infinity,
+                    "floatNan": Float.nan, "floatInfinity": Float.infinity, "good": 0.0,
+                    "numberNan": NSNumber(value: Double.nan), "cgFloatNan": CGFloat.nan,
+                    "bool": true,
+                ],
+                timestamp: 1, session: LensSession(sessionId: "s")
+            ),
+            1, LensEnvironment(p: "ios"), "user"
+        )
+        let json = Encoding.encodeBody(.json, [report]).body
+        XCTAssertTrue(json.contains("\"good\":0"))
+        XCTAssertFalse(json.contains("doubleNan"))
+        XCTAssertFalse(json.contains("doubleInfinity"))
+        XCTAssertFalse(json.contains("floatNan"))
+        XCTAssertFalse(json.contains("floatInfinity"))
+        XCTAssertFalse(json.contains("numberNan"))
+        XCTAssertFalse(json.contains("cgFloatNan"))
+        XCTAssertTrue(json.contains("\"bool\":true"))
+        let cmcd = Encoding.encodeBody(.cmcd, [report]).body
+        XCTAssertTrue(cmcd.contains("com.dolby.optiview-good=\"0\""))
+        XCTAssertTrue(cmcd.contains("com.dolby.optiview-bool=true"))
+        XCTAssertFalse(cmcd.contains("doubleNan"))
+        XCTAssertFalse(cmcd.contains("doubleInfinity"))
+        XCTAssertFalse(cmcd.contains("floatNan"))
+        XCTAssertFalse(cmcd.contains("floatInfinity"))
+        XCTAssertFalse(cmcd.contains("numberNan"))
+        XCTAssertFalse(cmcd.contains("cgFloatNan"))
     }
 
     func testExplicitCustomTokensAreBareInCmcdAndStringsInJson() {
@@ -230,6 +293,84 @@ final class TransportTests: XCTestCase {
         XCTAssertTrue(requests[0].body.contains("com.dolby.optiview-ad=\"ad-1\""))
         XCTAssertTrue(requests[0].body.contains("com.dolby.optiview-ns=\"ads\""))
         XCTAssertTrue(requests[0].body.contains("e=as"))
+    }
+
+    func testTruncatesOverlongCustomStringsOnTheCmcdWireInDefaultMode() throws {
+        let value = String(repeating: "x", count: 65)
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
+        lens.startSession()
+        lens.emit(.adStart, payload: LensAdPayload(custom: ["ad": value]))
+        lens.endSession()
+
+        let requests = waitForRequests(1, path: "/ingest")
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertTrue(
+            requests[0].body.contains(
+                "com.dolby.optiview-ad=\"\(String(repeating: "x", count: 64))\""))
+        XCTAssertFalse(requests[0].body.contains("com.dolby.optiview-ad=\"\(value)\""))
+    }
+
+    func testWarnsOncePerSessionAndKeyWhenTruncatingCustomStrings() throws {
+        let originalWarn = Lens.warn
+        var warnings: [String] = []
+        Lens.warn = { warnings.append($0) }
+        defer { Lens.warn = originalWarn }
+
+        let value = String(repeating: "x", count: 65)
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
+        lens.startSession()
+        lens.emit(.adStart, payload: LensAdPayload(custom: ["ad": value]))
+        lens.emit(.adEnd, payload: LensAdPayload(custom: ["ad": value, "bid": value]))
+        lens.startSession()
+        lens.emit(.adStart, payload: LensAdPayload(custom: ["ad": value]))
+        lens.endSession()
+
+        let requests = waitForRequests(3, path: "/ingest")
+        let adWarning =
+            "Lens: custom value for 'ad' exceeds 64 UTF-16 units and is truncated on the CMCD wire"
+        XCTAssertEqual(
+            warnings,
+            [
+                adWarning,
+                "Lens: custom value for 'bid' exceeds 64 UTF-16 units and is truncated on the CMCD wire",
+                adWarning,
+            ])
+        XCTAssertEqual(requests.count, 3)
+        XCTAssertTrue(
+            requests.allSatisfy {
+                $0.body.contains(
+                    "com.dolby.optiview-ad=\"\(String(repeating: "x", count: 64))\"")
+            })
+        XCTAssertTrue(
+            requests.allSatisfy {
+                !$0.body.contains("com.dolby.optiview-ad=\"\(value)\"")
+            })
+    }
+
+    func testCountsUtf16UnitsWhenTruncatingAstralCustomStringsOnTheCmcdWire() throws {
+        let originalWarn = Lens.warn
+        var warnings: [String] = []
+        Lens.warn = { warnings.append($0) }
+        defer { Lens.warn = originalWarn }
+
+        let value = String(repeating: "𝄞", count: 33)
+        XCTAssertEqual(value.utf16.count, 66)
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
+        lens.startSession()
+        lens.emit(.adStart, payload: LensAdPayload(custom: ["ad": value]))
+        lens.endSession()
+
+        let requests = waitForRequests(1, path: "/ingest")
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertTrue(
+            requests[0].body.contains(
+                "com.dolby.optiview-ad=\"\(String(repeating: "𝄞", count: 32))\""))
+        XCTAssertFalse(requests[0].body.contains("com.dolby.optiview-ad=\"\(value)\""))
+        XCTAssertEqual(
+            warnings,
+            [
+                "Lens: custom value for 'ad' exceeds 64 UTF-16 units and is truncated on the CMCD wire"
+            ])
     }
 
     func testJsonDestinationsNeverSeeThePrefix() throws {
@@ -292,13 +433,200 @@ final class TransportTests: XCTestCase {
         XCTAssertEqual(sns, [1, 2, 1])
     }
 
-    func testRetriesAFailedPostOnce() throws {
-        ReceiverProtocol.failFirst = 1
+    func testA204WithNoBodyIsDeliveryNotAFailure() throws {
         let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
         lens.startSession()
         lens.emit(.adStart)
         lens.endSession()
 
+        XCTAssertEqual(waitForRequests(1, path: "/ingest").count, 1)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.15))
+        XCTAssertEqual(ReceiverProtocol.snapshot().filter { $0.path == "/ingest" }.count, 1)
+    }
+
+    func testBacksOffOn429AndRetriesTheSameBodyUntilAccepted() throws {
+        ReceiverProtocol.script["/ingest"] = [.init(status: 429), .init(status: 429)]
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
+        lens.startSession()
+        lens.emit(.adStart)
+        lens.endSession()
+
+        let posts = waitForRequests(3, path: "/ingest")
+        XCTAssertEqual(posts.count, 3)
+        XCTAssertEqual(Set(posts.map(\.body)).count, 1)
+    }
+
+    func testHonorsRetryAfterDeltaSecondsOn429() throws {
+        ReceiverProtocol.script["/ingest"] = [.init(status: 429, headers: ["Retry-After": "1"])]
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
+        lens.startSession()
+        lens.emit(.adStart)
+        lens.endSession()
+
+        XCTAssertEqual(waitForRequests(1, path: "/ingest").count, 1)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.15))
+        // The header said one second; the shrunken test backoff would have
+        // retried well within the settle window.
+        XCTAssertEqual(ReceiverProtocol.snapshot().filter { $0.path == "/ingest" }.count, 1)
+        XCTAssertEqual(waitForRequests(2, path: "/ingest", timeout: 3).count, 2)
+    }
+
+    func testGivesUpAfterThreeRetriesOnPersistent5xx() throws {
+        ReceiverProtocol.failFirst = 10
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
+        lens.startSession()
+        lens.emit(.adStart)
+        lens.endSession()
+
+        XCTAssertEqual(waitForRequests(4, path: "/ingest").count, 4)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.15))
+        XCTAssertEqual(ReceiverProtocol.snapshot().filter { $0.path == "/ingest" }.count, 4)
+        XCTAssertEqual(TransportRuntime.inFlightCount, 0)
+    }
+
+    func testDoesNotRetryOther4xx() throws {
+        ReceiverProtocol.script["/ingest"] = [.init(status: 400)]
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
+        lens.startSession()
+        lens.emit(.adStart)
+        lens.endSession()
+
+        XCTAssertEqual(waitForRequests(1, path: "/ingest").count, 1)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.15))
+        XCTAssertEqual(ReceiverProtocol.snapshot().filter { $0.path == "/ingest" }.count, 1)
+    }
+
+    func testCeasesA410TargetWhileOtherDestinationsKeepDelivering() throws {
+        ReceiverProtocol.script["/gone"] = [.init(status: 410)]
+        let lens = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads",
+                destinations: [LensDestination(url: "http://mock.lens/gone", format: .json)],
+                heartbeatMs: 0
+            ))
+        lens.startSession()
+        lens.emit(.adStart)
+        XCTAssertEqual(waitForRequests(1, path: "/gone").count, 1)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.15))
+        lens.emit(.adEnd)
+        lens.endSession()
+
         XCTAssertEqual(waitForRequests(2, path: "/ingest").count, 2)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.15))
+        // The 410 answered the first post; the second never went out.
+        XCTAssertEqual(ReceiverProtocol.snapshot().filter { $0.path == "/gone" }.count, 1)
+    }
+
+    func testHoldsEventsDuringCooldownAndDeliversThemInOnePost() throws {
+        ReceiverProtocol.script["/ingest"] = [.init(status: 503, headers: ["Retry-After": "1"])]
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
+        lens.startSession()
+        lens.emit(.adBreakStart)
+        XCTAssertEqual(waitForRequests(1, path: "/ingest").count, 1)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.15))
+        // The target is cooling down — these accumulate instead of posting.
+        lens.emit(.adStart)
+        lens.emit(.adEnd)
+        lens.endSession()
+
+        let posts = waitForRequests(3, path: "/ingest")
+        let held = posts.filter { $0.body.contains("e=as") }
+        XCTAssertEqual(held.count, 1)
+        XCTAssertTrue(held[0].body.contains("e=ae"))
+    }
+
+    func testIgnoresMalformedRetryAfterAndCapsHugeValues() {
+        func parsed(_ header: String?, status: Int = 429) -> Int? {
+            var fields: [String: String] = [:]
+            if let header { fields["Retry-After"] = header }
+            let response = HTTPURLResponse(
+                url: URL(string: "http://mock.lens/ingest")!, statusCode: status,
+                httpVersion: "HTTP/1.1", headerFields: fields)!
+            return TransportRuntime.retryAfterMs(response, status: status)
+        }
+        XCTAssertEqual(parsed("2"), 2000)
+        XCTAssertEqual(parsed(" 2 ", status: 503), 2000)
+        XCTAssertNil(parsed("2", status: 500))  // only 429/503 carry it
+        XCTAssertNil(parsed("Fri, 31 Dec 1999 23:59:59 GMT"))
+        XCTAssertNil(parsed("-1"))
+        XCTAssertNil(parsed("1.5"))
+        XCTAssertNil(parsed("soon"))
+        XCTAssertEqual(parsed("86400"), 30000)
+        XCTAssertNil(parsed(nil))
+    }
+
+    func testBoundsACooldownHeldQueueTo128EventsEvictingTheOldest() throws {
+        ReceiverProtocol.script["/ingest"] = [.init(status: 503, headers: ["Retry-After": "1"])]
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
+        lens.startSession()
+        lens.emit(.adBreakStart)
+        XCTAssertEqual(waitForRequests(1, path: "/ingest").count, 1)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.15))
+        lens.emit(.adBreakEnd)  // oldest held — evicted below
+        for _ in 0..<128 { lens.emit(.adStart) }
+        lens.endSession()
+
+        let posts = waitForRequests(2, path: "/ingest")
+        let held = posts.first { $0.body.contains("e=as") }!
+        XCTAssertEqual(held.body.components(separatedBy: "e=as").count - 1, 128)
+        XCTAssertFalse(held.body.contains("e=abe"))
+    }
+
+    func testFlushPostsEvenWhileTheTargetIsCoolingDown() throws {
+        ReceiverProtocol.script["/ingest"] = [.init(status: 503, headers: ["Retry-After": "30"])]
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
+        lens.startSession()
+        lens.emit(.adBreakStart)
+        XCTAssertEqual(waitForRequests(1, path: "/ingest").count, 1)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.15))
+        lens.emit(.adStart)
+        lens.flush()
+
+        // The 30s cooldown would outlive any lifecycle cliff — flush bypasses it.
+        let posts = waitForRequests(2, path: "/ingest")
+        XCTAssertEqual(posts.count, 2)
+        XCTAssertTrue(posts[1].body.contains("e=as"))
+    }
+
+    func testFlushAllPostsEveryLiveHandlesPendingEvents() throws {
+        let lens = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads",
+                destinations: [
+                    LensDestination(
+                        url: "http://mock.lens/batched", format: .json,
+                        batch: LensBatch(maxEvents: 10))
+                ],
+                heartbeatMs: 0
+            ))
+        lens.startSession()
+        lens.emit(.adStart)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertEqual(ReceiverProtocol.snapshot().filter { $0.path == "/batched" }.count, 0)
+
+        TransportRuntime.flushAll()
+        XCTAssertEqual(waitForRequests(1, path: "/batched").count, 1)
+        lens.dispose()
+    }
+
+    func testFlushPostsPendingEventsWithoutEndingTheSession() throws {
+        let lens = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads",
+                destinations: [
+                    LensDestination(
+                        url: "http://mock.lens/batched", format: .json,
+                        batch: LensBatch(maxEvents: 10))
+                ],
+                heartbeatMs: 0
+            ))
+        lens.startSession()
+        lens.emit(.adStart)
+        lens.flush()
+
+        XCTAssertEqual(waitForRequests(1, path: "/batched").count, 1)
+        XCTAssertNotNil(lens.session)
+        lens.dispose()
+        lens.flush()  // disposed: a no-op, never a crash
     }
 }

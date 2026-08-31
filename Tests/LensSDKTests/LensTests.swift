@@ -44,7 +44,15 @@ final class LensTests: XCTestCase {
 
     private var running: [Ticker] { tickers.filter { !$0.stopped } }
 
+    // This suite is about API semantics, not delivery — no test here may
+    // touch the network (its destinations don't resolve anywhere real).
+    override func setUp() {
+        super.setUp()
+        TransportRuntime.postOverride = { _, _, _ in }
+    }
+
     override func tearDown() {
+        TransportRuntime.postOverride = nil
         Lens.sinkForTesting = nil
         Lens.ticker = defaultTicker
         Lens.resetConfigurationForTesting()
@@ -254,6 +262,42 @@ final class LensTests: XCTestCase {
         }
         XCTAssertEqual(violations().count, invalid.count)
         XCTAssertTrue(violations().allSatisfy { $0.contains("custom token value") })
+    }
+
+    func testDropsNonFiniteCustomValuesWhileSendingTheEventAndHeartbeat() throws {
+        captureSink()
+        captureTickers()
+        let values = [Double.nan, Double.infinity, -Double.infinity]
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", destinations: [ingest]))
+        lens.startSession()
+        delivered.removeAll()
+        for value in values {
+            lens.emit(.adStart, payload: LensAdPayload(custom: ["bad": value, "good": "ok"]))
+        }
+        XCTAssertEqual(delivered.count, values.count)
+        XCTAssertTrue(
+            delivered.allSatisfy {
+                $0.event.keys?.count == 1 && $0.event.keys?["good"] as? String == "ok"
+            })
+
+        delivered.removeAll()
+        lens.setHeartbeatPayload(LensPayload(custom: ["bad": Double.nan, "good": "ok"]))
+        running[0].tick()
+        XCTAssertEqual(delivered.first?.event.keys?["good"] as? String, "ok")
+        XCTAssertNil(delivered.first?.event.keys?["bad"])
+
+        let violations = captureViolations()
+        defer { Lens.usageViolation = { preconditionFailure($0) } }
+        let strict = try Lens.join(
+            LensJoinOptions(
+                namespace: "strict-ads", destinations: [ingest], strict: true, heartbeatMs: 0))
+        strict.startSession()
+        for value in values {
+            strict.emit(.adStart, payload: LensAdPayload(custom: ["bad": value]))
+        }
+        strict.setHeartbeatPayload(LensPayload(custom: ["bad": Double.infinity]))
+        XCTAssertEqual(violations().count, values.count + 1)
+        XCTAssertTrue(violations().allSatisfy { $0.contains("non-finite value") })
     }
 
     func testRejectsInvalidCustomEventNamesLoudly() throws {
@@ -869,6 +913,50 @@ final class LensTests: XCTestCase {
             delivered.map(\.destination.url),
             ["https://ads-only.test", "https://ads-only.test", "https://ads-only.test"]
         )
+    }
+
+    // MARK: duplicate copy detection
+
+    func testRegistersItselfUnderTheWellKnownKeyWithoutViolation() {
+        let key = "com.dolby.optiview.lens"
+        let previous = getenv(key).map { String(cString: $0) }
+        defer { restore(key, to: previous) }
+        unsetenv(key)
+
+        var warnings: [String] = []
+        let defaultWarning = Lens.duplicateCopyWarning
+        Lens.duplicateCopyWarning = { warnings.append($0) }
+        defer { Lens.duplicateCopyWarning = defaultWarning }
+
+        Lens.detectDuplicateCopy()
+        Lens.detectDuplicateCopy()  // the same copy again is not a duplicate
+        XCTAssertNotNil(getenv(key))
+        XCTAssertEqual(warnings, [])
+    }
+
+    func testWarnsWhenAnotherCopyAlreadyRegistered() {
+        let key = "com.dolby.optiview.lens"
+        let previous = getenv(key).map { String(cString: $0) }
+        defer { restore(key, to: previous) }
+        setenv(key, "another-copy", 1)
+
+        var warnings: [String] = []
+        let defaultWarning = Lens.duplicateCopyWarning
+        Lens.duplicateCopyWarning = { warnings.append($0) }
+        defer { Lens.duplicateCopyWarning = defaultWarning }
+
+        Lens.detectDuplicateCopy()
+        XCTAssertEqual(warnings.count, 1)
+        XCTAssertTrue(warnings[0].contains("another copy of the Lens SDK"))
+        XCTAssertTrue(warnings[0].contains("another-copy"))
+    }
+
+    private func restore(_ key: String, to value: String?) {
+        if let value {
+            setenv(key, value, 1)
+        } else {
+            unsetenv(key)
+        }
     }
 
     // MARK: dispose

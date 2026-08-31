@@ -4,10 +4,40 @@ public enum Lens {
     nonisolated(unsafe) private static var configuredBackend: EffectiveBackend?
     private static let backendLock = NSLock()
 
+    /// "One Lens copy per app" (docs/distribution.md): with the packaging
+    /// rule holding, this type is process-global and nothing more is needed.
+    /// A statically linked or vendored second copy escapes that guarantee
+    /// silently — this rendezvous through a string-keyed process-global
+    /// environment entry exists to make it loud.
+    private static let duplicateCopyCheck: Void = detectDuplicateCopy()
+
+    internal static func detectDuplicateCopy() {
+        let key = "com.dolby.optiview.lens"
+        let identity = String(describing: ObjectIdentifier(Lens.self))
+        if let existing = getenv(key).map({ String(cString: $0) }) {
+            if existing != identity {
+                duplicateCopyWarning(
+                    "Lens: another copy of the Lens SDK is loaded in this process "
+                        + "(\(existing) and \(identity)). "
+                        + "Ship one Lens copy per app — see docs/distribution.md.")
+            }
+            return
+        }
+        setenv(key, identity, 0)
+    }
+
+    /// A duplicate copy is a packaging mistake, not a reason to abort the host
+    /// app — warn, like Android and web. Swappable so tests can observe it.
+    nonisolated(unsafe) internal static var duplicateCopyWarning: (String) -> Void = { message in
+        print("[Lens] \(message)")
+    }
+
     public static func configure(_ options: LensConfigureOptions) throws {
+        _ = duplicateCopyCheck
         backendLock.lock()
         defer { backendLock.unlock() }
         try setBackend(options.backend == .disabled ? .disabled : .production)
+        TransportRuntime.lifecycleFlush = options.lifecycleFlush
     }
 
     /// Wiring for the LensSDKDev product — registers the development ingest
@@ -72,7 +102,13 @@ public enum Lens {
         preconditionFailure(message)
     }
 
+    /// The SDK's diagnostic channel, for what has no caller to answer to.
+    nonisolated(unsafe) internal static var warn: (String) -> Void = { message in
+        print(message)
+    }
+
     public static func join(_ options: LensJoinOptions) throws -> LensHandle {
+        _ = duplicateCopyCheck
         guard Validation.matches(options.namespace, Validation.setupPattern) else {
             throw LensError.invalidOptions(
                 "Lens: namespace must be 1-64 printable ASCII characters")
@@ -229,6 +265,14 @@ public enum Lens {
                 transport.purge()
                 UserIdRuntime.clear()
             }
+        }
+
+        func flush() {
+            lock.lock()
+            let disposed = self.disposed
+            lock.unlock()
+            guard !disposed else { return }
+            transport.flush()
         }
 
         func dispose() {

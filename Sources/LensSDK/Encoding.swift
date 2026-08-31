@@ -1,5 +1,14 @@
 import Foundation
 
+internal func isNonFiniteNumber(_ value: Any) -> Bool {
+    if value is Bool { return false }
+    if let double = value as? Double { return !double.isFinite }
+    if let float = value as? Float { return !float.isFinite }
+    if let cgFloat = value as? CGFloat { return !cgFloat.isFinite }
+    if let number = value as? NSNumber { return !number.doubleValue.isFinite }
+    return false
+}
+
 /// Report assembly and the encoder seam — one `ReportEncoder` per wire
 /// format, each in its own file. Mechanics: docs/internals.md.
 internal protocol ReportEncoder {
@@ -31,18 +40,26 @@ internal enum Encoding {
 
     static let wirePrefix = "com.dolby.optiview-"
 
-    /// Replace control characters (they can't ride a structured field and
-    /// break newline batch framing), then truncate to a UTF-16 unit budget
-    /// (how the ecosystem validator counts) on scalar boundaries only — a
-    /// raw UTF-16 cut can split a surrogate pair.
-    static func sanitizeAndTruncate(_ value: String, maxUnits: Int) -> String {
-        var units = 0
+    /// Replace control characters before they reach a structured field.
+    static func sanitize(_ value: String) -> String {
         var out = String.UnicodeScalarView()
         for scalar in value.unicodeScalars {
-            let clean: Unicode.Scalar = (scalar.value < 0x20 || scalar.value == 0x7F) ? " " : scalar
-            let width = clean.value > 0xFFFF ? 2 : 1
+            out.append((scalar.value < 0x20 || scalar.value == 0x7F) ? " " : scalar)
+        }
+        return String(out)
+    }
+
+    /// Truncate to a UTF-16 unit budget (how the ecosystem validator counts)
+    /// on scalar boundaries only — a raw UTF-16 cut can split a surrogate
+    /// pair.
+    static func sanitizeAndTruncate(_ value: String, maxUnits: Int) -> String {
+        let sanitized = sanitize(value)
+        var units = 0
+        var out = String.UnicodeScalarView()
+        for scalar in sanitized.unicodeScalars {
+            let width = scalar.value > 0xFFFF ? 2 : 1
             if units + width > maxUnits { break }
-            out.append(clean)
+            out.append(scalar)
             units += width
         }
         return String(out)
@@ -89,7 +106,7 @@ internal enum Encoding {
         if let keys = event.keys {
             for key in keys.keys.sorted() { report.append((key, keys[key]!)) }
         }
-        return report
+        return report.filter { !isNonFiniteNumber($0.1) }
     }
 
     static func encoderFor(_ format: LensFormat) -> ReportEncoder {

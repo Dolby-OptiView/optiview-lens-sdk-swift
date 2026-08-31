@@ -14,9 +14,15 @@ internal enum EffectiveBackend: Equatable {
 
 public struct LensConfigureOptions {
     public var backend: LensBackend
+    /// Automatic flushing when the app leaves the foreground, on by default.
+    /// Turn off only when the host flushes from its own lifecycle via
+    /// `LensHandle.flush()`. Each `configure` applies it anew; omitting it
+    /// restores the default.
+    public var lifecycleFlush: Bool
 
-    public init(backend: LensBackend) {
+    public init(backend: LensBackend, lifecycleFlush: Bool = true) {
         self.backend = backend
+        self.lifecycleFlush = lifecycleFlush
     }
 }
 
@@ -93,6 +99,11 @@ public protocol LensHandle: AnyObject {
     /// nothing.
     func setHeartbeatInterval(_ ms: Int64)
     func setConsent(_ consent: LensConsent)
+    /// Send everything pending now. Not needed by a standard integrator —
+    /// lifecycle flushing already covers the common cliffs; this is for hosts
+    /// that opted out of it or live outside the observed lifecycles. Does not
+    /// end the session; no-op after dispose.
+    func flush()
     func dispose()
 }
 

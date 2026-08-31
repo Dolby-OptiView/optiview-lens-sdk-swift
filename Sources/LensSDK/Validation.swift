@@ -90,6 +90,8 @@ internal enum Validation {
             } else if key.count > keyMax {
                 problem =
                     "Lens: custom key '\(key)' exceeds \(keyMax) characters (the spec's 64 minus the wire prefix)"
+            } else if isNonFiniteNumber(value) {
+                problem = "Lens: custom key '\(key)' has a non-finite value (NaN or Infinity)"
             } else if let token = value as? LensToken, !isValidToken(token.value) {
                 problem =
                     "Lens: invalid custom token value '\(token.value)' — must match the RFC 8941 sf-token grammar"
