@@ -36,6 +36,9 @@ internal enum Validation {
     /// Content IDs (spec `cid`): printable ASCII, max 128 (the spec's raised cid budget).
     static let contentIdPattern = "^[\\x20-\\x7E]{1,128}$"
 
+    /// Hostnames (spec `h`): printable ASCII, max 128 — same budget as `cid`.
+    static let hostnamePattern = "^[\\x20-\\x7E]{1,128}$"
+
     /// Streaming format (`sf`) tokens (CTA-5004-B Table 1).
     static let sfTokens: Set<String> = ["d", "h", "s", "e", "o"]
 

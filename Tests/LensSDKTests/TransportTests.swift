@@ -108,6 +108,12 @@ final class TransportTests: XCTestCase {
     }
 
     override func tearDown() {
+        // Let posts still in flight (a session-end quit report, a scheduled
+        // retry) land before the next test resets the captured requests.
+        let idleDeadline = Date().addingTimeInterval(1)
+        repeat {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        } while TransportRuntime.inFlightCount > 0 && Date() < idleDeadline
         TransportRuntime.ingestOverride = nil
         TransportRuntime.postOverride = nil
         TransportRuntime.resetSnRegistryForTesting()
@@ -164,7 +170,9 @@ final class TransportTests: XCTestCase {
                     session: LensSession(sessionId: sid),
                     contentId: raw["contentId"] as? String,
                     streamingFormat: raw["streamingFormat"] as? String,
-                    streamType: raw["streamType"] as? String
+                    streamType: raw["streamType"] as? String,
+                    hostname: raw["hostname"] as? String,
+                    playbackState: raw["playbackState"] as? String
                 )
                 return Encoding.toReport(event, sn, environment, userId)
             }
@@ -263,7 +271,6 @@ final class TransportTests: XCTestCase {
         let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
         lens.startSession()
         lens.emit(.adStart)
-        lens.endSession()
 
         XCTAssertEqual(postedUrls, [devUrl])
     }
@@ -276,7 +283,6 @@ final class TransportTests: XCTestCase {
         let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
         lens.startSession()
         lens.emit(.adStart)
-        lens.endSession()
 
         XCTAssertTrue(postedUrls.isEmpty)
     }
@@ -285,7 +291,6 @@ final class TransportTests: XCTestCase {
         let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
         lens.startSession()
         lens.emit(.adStart, payload: LensAdPayload(custom: ["ad": "ad-1"]))
-        lens.endSession()
 
         let requests = waitForRequests(1, path: "/ingest")
         XCTAssertEqual(requests.count, 1)
@@ -300,7 +305,6 @@ final class TransportTests: XCTestCase {
         let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
         lens.startSession()
         lens.emit(.adStart, payload: LensAdPayload(custom: ["ad": value]))
-        lens.endSession()
 
         let requests = waitForRequests(1, path: "/ingest")
         XCTAssertEqual(requests.count, 1)
@@ -323,9 +327,9 @@ final class TransportTests: XCTestCase {
         lens.emit(.adEnd, payload: LensAdPayload(custom: ["ad": value, "bid": value]))
         lens.startSession()
         lens.emit(.adStart, payload: LensAdPayload(custom: ["ad": value]))
-        lens.endSession()
 
-        let requests = waitForRequests(3, path: "/ingest")
+        // The roll's quit rides along; the truncation story is about the emits.
+        let requests = waitForRequests(4, path: "/ingest").filter { !$0.body.contains("e=ps") }
         let adWarning =
             "Lens: custom value for 'ad' exceeds 64 UTF-16 units and is truncated on the CMCD wire"
         XCTAssertEqual(
@@ -358,7 +362,6 @@ final class TransportTests: XCTestCase {
         let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
         lens.startSession()
         lens.emit(.adStart, payload: LensAdPayload(custom: ["ad": value]))
-        lens.endSession()
 
         let requests = waitForRequests(1, path: "/ingest")
         XCTAssertEqual(requests.count, 1)
@@ -381,7 +384,6 @@ final class TransportTests: XCTestCase {
             ))
         lens.startSession()
         lens.emitCustom("adBreakAdded", payload: LensPayload(custom: ["count": 2]))
-        lens.endSession()
 
         let requests = waitForRequests(1, path: "/adops")
         XCTAssertEqual(requests.count, 1)
@@ -424,20 +426,36 @@ final class TransportTests: XCTestCase {
         lens.emit(.adStart)
         lens.endSession()
 
-        let requests = waitForRequests(3, path: "/ingest")
-        let bodies = requests.map(\.body).joined(separator: "\n")
-        let sns = bodies.split(separator: "\n").compactMap { line -> Int? in
-            guard let range = line.range(of: "sn=") else { return nil }
-            return Int(line[range.upperBound...].prefix(while: { $0.isNumber }))
+        // Concurrent posts may arrive in any order — pin sn per (sid, event).
+        let requests = waitForRequests(5, path: "/ingest")
+        func field(_ key: String, _ body: String) -> String {
+            guard let range = body.range(of: "\(key)=") else { return "" }
+            return String(
+                body[range.upperBound...].prefix(while: { $0 != "," && $0 != "\n" }))
         }
-        XCTAssertEqual(sns, [1, 2, 1])
+        let posts = requests.map {
+            "\(field("sid", $0.body)) \(field("e", $0.body)) sn=\(field("sn", $0.body))"
+        }
+        let sids = requests.map { field("sid", $0.body) }
+        XCTAssertEqual(Set(sids).count, 2)
+        let first = sids[0]
+        let rolled = sids.first { $0 != first }!
+        XCTAssertTrue(posts.contains("\(first) as sn=1"))
+        XCTAssertTrue(posts.contains("\(first) ae sn=2"))
+        // Each quit report continues its ending session's sequence, never a fresh one.
+        XCTAssertTrue(posts.contains("\(first) ps sn=3"))
+        XCTAssertTrue(posts.contains("\(rolled) as sn=1"))
+        XCTAssertTrue(posts.contains("\(rolled) ps sn=2"))
+        XCTAssertTrue(
+            requests.filter { $0.body.contains("e=ps") }.allSatisfy {
+                $0.body.contains("sta=q")
+            })
     }
 
     func testA204WithNoBodyIsDeliveryNotAFailure() throws {
         let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
         lens.startSession()
         lens.emit(.adStart)
-        lens.endSession()
 
         XCTAssertEqual(waitForRequests(1, path: "/ingest").count, 1)
         RunLoop.current.run(until: Date().addingTimeInterval(0.15))
@@ -449,7 +467,6 @@ final class TransportTests: XCTestCase {
         let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
         lens.startSession()
         lens.emit(.adStart)
-        lens.endSession()
 
         let posts = waitForRequests(3, path: "/ingest")
         XCTAssertEqual(posts.count, 3)
@@ -461,7 +478,6 @@ final class TransportTests: XCTestCase {
         let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
         lens.startSession()
         lens.emit(.adStart)
-        lens.endSession()
 
         XCTAssertEqual(waitForRequests(1, path: "/ingest").count, 1)
         RunLoop.current.run(until: Date().addingTimeInterval(0.15))
@@ -476,7 +492,6 @@ final class TransportTests: XCTestCase {
         let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
         lens.startSession()
         lens.emit(.adStart)
-        lens.endSession()
 
         XCTAssertEqual(waitForRequests(4, path: "/ingest").count, 4)
         RunLoop.current.run(until: Date().addingTimeInterval(0.15))
@@ -489,7 +504,6 @@ final class TransportTests: XCTestCase {
         let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
         lens.startSession()
         lens.emit(.adStart)
-        lens.endSession()
 
         XCTAssertEqual(waitForRequests(1, path: "/ingest").count, 1)
         RunLoop.current.run(until: Date().addingTimeInterval(0.15))
@@ -509,7 +523,6 @@ final class TransportTests: XCTestCase {
         XCTAssertEqual(waitForRequests(1, path: "/gone").count, 1)
         RunLoop.current.run(until: Date().addingTimeInterval(0.15))
         lens.emit(.adEnd)
-        lens.endSession()
 
         XCTAssertEqual(waitForRequests(2, path: "/ingest").count, 2)
         RunLoop.current.run(until: Date().addingTimeInterval(0.15))
@@ -527,7 +540,7 @@ final class TransportTests: XCTestCase {
         // The target is cooling down — these accumulate instead of posting.
         lens.emit(.adStart)
         lens.emit(.adEnd)
-        lens.endSession()
+        lens.flush()
 
         let posts = waitForRequests(3, path: "/ingest")
         let held = posts.filter { $0.body.contains("e=as") }
@@ -564,7 +577,7 @@ final class TransportTests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(0.15))
         lens.emit(.adBreakEnd)  // oldest held — evicted below
         for _ in 0..<128 { lens.emit(.adStart) }
-        lens.endSession()
+        lens.flush()
 
         let posts = waitForRequests(2, path: "/ingest")
         let held = posts.first { $0.body.contains("e=as") }!
@@ -629,4 +642,70 @@ final class TransportTests: XCTestCase {
         lens.dispose()
         lens.flush()  // disposed: a no-op, never a crash
     }
+
+    func testDisposeLeavesZeroLiveTransports() throws {
+        let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
+        XCTAssertGreaterThanOrEqual(TransportRuntime.liveTransportCountForTesting, 1)
+        lens.dispose()
+        // ARC is deterministic: handles other tests leaked are already gone,
+        // so the count really is zero, not merely smaller.
+        XCTAssertEqual(TransportRuntime.liveTransportCountForTesting, 0)
+    }
+
+    func testDroppedUnanchoredHandleDeallocatesWithALiveSession() throws {
+        weak var dropped: AnyObject?
+        func makeAndDrop() throws {
+            let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
+            lens.startSession()
+            dropped = lens as AnyObject
+        }
+        try makeAndDrop()
+        XCTAssertNil(dropped)
+    }
+
+    // The macOS dev host has no UIKit, so the local `swift test` gate skips
+    // these — the simulator CI job is where they run.
+    #if canImport(UIKit)
+        func testLifecycleObserversFollowTheLiveSet() throws {
+            let first = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
+            let second = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
+            XCTAssertEqual(TransportRuntime.lifecycleObserverCountForTesting, 2)
+
+            first.dispose()
+            XCTAssertEqual(TransportRuntime.lifecycleObserverCountForTesting, 2)
+            second.dispose()
+            XCTAssertEqual(TransportRuntime.lifecycleObserverCountForTesting, 0)
+
+            // The next transport reinstalls the observers.
+            let third = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
+            XCTAssertEqual(TransportRuntime.lifecycleObserverCountForTesting, 2)
+            third.dispose()
+        }
+
+        func testBackgroundNotificationFlushesWhileLiveAndRunsNothingAfterTheLastDispose() throws {
+            let lens = try Lens.join(
+                LensJoinOptions(
+                    namespace: "ads",
+                    destinations: [
+                        LensDestination(
+                            url: "http://mock.lens/batched", format: .json,
+                            batch: LensBatch(maxEvents: 10))
+                    ],
+                    heartbeatMs: 0
+                ))
+            lens.startSession()
+            lens.emit(.adStart)
+
+            NotificationCenter.default.post(
+                name: UIApplication.didEnterBackgroundNotification, object: nil)
+            XCTAssertEqual(waitForRequests(1, path: "/batched").count, 1)
+
+            lens.dispose()
+            NotificationCenter.default.post(
+                name: UIApplication.didEnterBackgroundNotification, object: nil)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+            XCTAssertEqual(
+                ReceiverProtocol.snapshot().filter { $0.path == "/batched" }.count, 1)
+        }
+    #endif
 }

@@ -47,19 +47,50 @@ public struct LensJoinOptions {
     /// on its own — integrators never report it. Spec default 30000 ms; 0 turns
     /// it off; otherwise at least 1000 ms.
     public var heartbeatMs: Int64
+    /// The player this handle observes, as an opaque anchor (reference
+    /// identity). Handles joining with the same player share one Lens-owned
+    /// session: the first boundary signal mints it, later signals join it.
+    /// Without an anchor the handle keeps today's independent sessions.
+    public var player: AnyObject?
 
     public init(
         namespace: String,
         destinations: [LensDestination] = [],
         consent: LensConsent = .granted,
         strict: Bool = false,
-        heartbeatMs: Int64 = 30_000
+        heartbeatMs: Int64 = 30_000,
+        player: AnyObject? = nil
     ) {
         self.namespace = namespace
         self.destinations = destinations
         self.consent = consent
         self.strict = strict
         self.heartbeatMs = heartbeatMs
+        self.player = player
+    }
+}
+
+public struct LensSourceChange {
+    /// Whether the change starts a new viewing session (fresh sid) or
+    /// continues the current one (same sid and sequence, `c`/`h` change events).
+    public var newSession: Bool
+    /// The new main content ID (1-128 printable ASCII).
+    public var contentId: String?
+    /// The new delivery hostname (spec `h`, 1-128 printable ASCII).
+    public var hostname: String?
+    /// The new streaming format (`sf`): "d", "h", "s", "e", "o".
+    public var streamingFormat: String?
+
+    public init(
+        newSession: Bool,
+        contentId: String? = nil,
+        hostname: String? = nil,
+        streamingFormat: String? = nil
+    ) {
+        self.newSession = newSession
+        self.contentId = contentId
+        self.hostname = hostname
+        self.streamingFormat = streamingFormat
     }
 }
 
@@ -72,6 +103,13 @@ public protocol LensHandle: AnyObject {
     func endSession()
     /// The active session, or nil between sessions.
     var session: LensSession? { get }
+    /// Report that the playback source changed. `newSession: false` keeps the
+    /// session — the sid survives, the context updates, and the spec's own
+    /// change events (`c`, `h`) fire only for what actually changed.
+    /// `newSession: true` rotates the sid, exactly like starting over. Never
+    /// implement a same-session change as `endSession()` + `startSession()`:
+    /// that splits the session and resets `sn` — the one thing it must not do.
+    func reportSourceChange(_ change: LensSourceChange)
     /// Report a standard CMCD event. The payload type follows the token:
     /// free-form events take `LensPayload`; spec-shaped events get
     /// compile-checked typed payloads. Dropped when no session is active or
@@ -332,11 +370,16 @@ public struct LensEvent {
     public let streamingFormat: String?
     /// Stream type (`st`), from the session.
     public let streamType: String?
+    /// The new hostname (spec `h`); present only on hostname-change events.
+    public let hostname: String?
+    /// Playback state (spec `sta`); Lens-owned — only quit reports carry it.
+    public let playbackState: String?
 
     internal init(
         type: String, customName: String?, namespace: String, keys: LensEventKeys?,
         timestamp: Int64, session: LensSession,
-        contentId: String? = nil, streamingFormat: String? = nil, streamType: String? = nil
+        contentId: String? = nil, streamingFormat: String? = nil, streamType: String? = nil,
+        hostname: String? = nil, playbackState: String? = nil
     ) {
         self.type = type
         self.customName = customName
@@ -347,6 +390,8 @@ public struct LensEvent {
         self.contentId = contentId
         self.streamingFormat = streamingFormat
         self.streamType = streamType
+        self.hostname = hostname
+        self.playbackState = playbackState
     }
 }
 

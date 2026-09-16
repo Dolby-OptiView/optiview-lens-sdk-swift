@@ -122,8 +122,12 @@ final class LensTests: XCTestCase {
         let first = lens.startSession()
         let second = lens.startSession()
         XCTAssertNotEqual(first.sessionId, second.sessionId)
+        // The roll ends the first session, so it quits.
+        XCTAssertEqual(delivered[0].event.type, "ps")
+        XCTAssertEqual(delivered[0].event.playbackState, "q")
+        XCTAssertEqual(delivered[0].event.session.sessionId, first.sessionId)
         lens.emit(.adStart)
-        XCTAssertEqual(delivered.first?.event.session.sessionId, second.sessionId)
+        XCTAssertEqual(delivered[1].event.session.sessionId, second.sessionId)
     }
 
     func testDropsEmitsWhenNoSessionIsActive() throws {
@@ -135,7 +139,11 @@ final class LensTests: XCTestCase {
         lens.endSession()
         XCTAssertNil(lens.session)
         lens.emit(.adEnd)
-        XCTAssertEqual(delivered.count, 0)
+        // Only the session's own quit report went out — both emits were dropped.
+        XCTAssertEqual(delivered.count, 1)
+        XCTAssertEqual(delivered[0].event.type, "ps")
+        XCTAssertEqual(delivered[0].event.namespace, "lens")
+        XCTAssertEqual(delivered[0].event.playbackState, "q")
     }
 
     func testKeepsDestinationsAcrossSessionRolls() throws {
@@ -146,7 +154,7 @@ final class LensTests: XCTestCase {
         lens.emit(.adStart)
         lens.startSession()
         lens.emit(.adStart)
-        XCTAssertEqual(delivered.count, 2)
+        XCTAssertEqual(delivered.count, 3)  // the roll's quit rides along
         XCTAssertTrue(delivered.allSatisfy { $0.destination.url == ingest.url })
     }
 
@@ -641,8 +649,9 @@ final class LensTests: XCTestCase {
         let rolled = lens.startSession()
         XCTAssertEqual(running.count, 1)
         running[0].tick()
-        XCTAssertEqual(delivered.count, 3)  // one per session start, then the tick
-        XCTAssertEqual(delivered[2].event.session.sessionId, rolled.sessionId)
+        // One per session start, the roll's quit, then the tick.
+        XCTAssertEqual(delivered.count, 4)
+        XCTAssertEqual(delivered[3].event.session.sessionId, rolled.sessionId)
 
         lens.dispose()
         XCTAssertEqual(running.count, 0)
@@ -785,10 +794,11 @@ final class LensTests: XCTestCase {
         XCTAssertEqual(running[0].intervalMs, 5_000)
         XCTAssertEqual(delivered.count, 1)
 
-        lens.dispose()
+        lens.dispose()  // ends the live session: the quit report goes out
         lens.setHeartbeatInterval(10_000)
         XCTAssertEqual(running.count, 0)
-        XCTAssertEqual(delivered.count, 1)
+        XCTAssertEqual(delivered.count, 2)
+        XCTAssertEqual(delivered[1].event.type, "ps")
     }
 
     // MARK: heartbeat payload
@@ -880,9 +890,39 @@ final class LensTests: XCTestCase {
         XCTAssertEqual(delivered[0].event.keys?["pod"] as? String, "mid-1")
         XCTAssertEqual(delivered.count, 2)
 
-        lens.dispose()
+        lens.dispose()  // ends the live session: the quit report carries the snapshot
         lens.setHeartbeatPayload(LensPayload(custom: ["pod": "mid-2"]))
-        XCTAssertEqual(delivered.count, 2)
+        XCTAssertEqual(delivered.count, 3)
+        XCTAssertEqual(delivered[2].event.type, "ps")
+        XCTAssertEqual(delivered[2].event.namespace, "lens")
+        XCTAssertEqual(delivered[2].event.playbackState, "q")
+        XCTAssertEqual(delivered[2].event.keys?["pod"] as? String, "mid-1")
+    }
+
+    func testTheQuitReachesANamespaceFilteredDestinationOnlyWhenTheFilterListsLens() throws {
+        captureSink()
+        let lens = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads",
+                destinations: [
+                    LensDestination(
+                        url: "https://ads-only.test",
+                        filter: LensDestinationFilter(namespaces: ["ads"])),
+                    LensDestination(
+                        url: "https://ads-and-lens.test",
+                        filter: LensDestinationFilter(namespaces: ["ads", "lens"])),
+                ],
+                heartbeatMs: 0
+            )
+        )
+        lens.startSession()
+        lens.emit(LensEventType.adStart)
+        lens.endSession()
+        func types(_ url: String) -> [String] {
+            delivered.filter { $0.destination.url == url }.map(\.event.type)
+        }
+        XCTAssertEqual(types("https://ads-only.test"), ["as"])
+        XCTAssertEqual(types("https://ads-and-lens.test"), ["as", "ps"])
     }
 
     func testTheNamespaceNeverFlipsSoAFilteredDestinationCannotLoseLiveness() throws {
@@ -971,6 +1011,297 @@ final class LensTests: XCTestCase {
         lens.startSession()
         lens.emit(.adStart)
         XCTAssertNil(lens.session)
+        // Disposing with a live session quits it; nothing follows.
+        XCTAssertEqual(delivered.count, 1)
+        XCTAssertEqual(delivered[0].event.type, "ps")
+        XCTAssertEqual(delivered[0].event.namespace, "lens")
+        XCTAssertEqual(delivered[0].event.playbackState, "q")
+    }
+
+    func testAJoinDisposeJoinCycleEmitsOneHeartbeatPerTickSnAdvancingByOne() throws {
+        captureTickers()
+        var posts: [String] = []
+        TransportRuntime.postOverride = { _, body, _ in posts.append(body) }
+        defer {
+            TransportRuntime.postOverride = { _, _, _ in }
+            TransportRuntime.resetSnRegistryForTesting()
+        }
+
+        let first = try Lens.join(LensJoinOptions(namespace: "ads"))
+        first.startSession(LensStartSessionOptions(sessionId: "sid-teardown"))
+        try XCTUnwrap(running.first).tick()
+        try XCTUnwrap(running.first).tick()
+        let stale = try XCTUnwrap(running.first)
+        first.dispose()
+        XCTAssertEqual(running.count, 0)
+        stale.tick()  // a leaked subscriber would post here
+
+        let second = try Lens.join(LensJoinOptions(namespace: "ads"))
+        second.startSession(LensStartSessionOptions(sessionId: "sid-teardown"))
+        try XCTUnwrap(running.first).tick()
+        second.dispose()
+
+        let sns = posts.map(Self.sn)
+        // Three heartbeats then the quit before dispose, none after, two
+        // heartbeats and the quit from the second join — a doubled sn step
+        // is the signature of two live subscribers.
+        XCTAssertEqual(sns, [1, 2, 3, 4, 5, 6, 7])
+    }
+
+    // MARK: session ownership
+
+    func testTwoHandlesOnOnePlayerShareTheMintedSidTheSecondSignalJoins() throws {
+        captureSink()
+        let player = NSObject()
+        let ads = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads", destinations: [ingest], heartbeatMs: 0, player: player))
+        let live = try Lens.join(
+            LensJoinOptions(
+                namespace: "live", destinations: [ingest], heartbeatMs: 0, player: player))
+        let minted = ads.startSession()
+        let joined = live.startSession()
+        XCTAssertEqual(minted.sessionId, joined.sessionId)
+        ads.emit(.adStart)
+        live.emitCustom("fallback")
+        XCTAssertEqual(
+            delivered.map { $0.event.session.sessionId },
+            [minted.sessionId, minted.sessionId]
+        )
+    }
+
+    func testEndSessionFromANonMintingHandleWarnsAndIsANoOp() throws {
+        captureSink()
+        let player = NSObject()
+        let ads = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads", destinations: [ingest], heartbeatMs: 0, player: player))
+        let live = try Lens.join(
+            LensJoinOptions(
+                namespace: "live", destinations: [ingest], heartbeatMs: 0, player: player))
+        ads.startSession()
+        live.startSession()
+
+        var warnings: [String] = []
+        let defaultWarn = Lens.warn
+        Lens.warn = { warnings.append($0) }
+        defer { Lens.warn = defaultWarn }
+        live.endSession()
+        XCTAssertEqual(warnings.count, 1)
+        XCTAssertTrue(warnings[0].contains("endSession() ignored"))
+        XCTAssertNotNil(live.session)
         XCTAssertEqual(delivered.count, 0)
+
+        ads.endSession()
+        XCTAssertNil(ads.session)
+        XCTAssertNil(live.session)
+    }
+
+    func testEndingTheSharedSessionEmitsOneQuitCarryingBothHandlesSnapshots() throws {
+        captureSink()
+        let player = NSObject()
+        let ads = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads", destinations: [ingest], heartbeatMs: 0, player: player))
+        let live = try Lens.join(
+            LensJoinOptions(
+                namespace: "live", destinations: [ingest], heartbeatMs: 0, player: player))
+        ads.startSession()
+        live.startSession()
+        ads.setHeartbeatPayload(LensPayload(custom: ["pod": "mid-1"]))
+        live.setHeartbeatPayload(LensPayload(custom: ["endpoint": 2]))
+        ads.endSession()
+        XCTAssertEqual(delivered.count, 1)
+        let event = delivered[0].event
+        XCTAssertEqual(event.type, "ps")
+        XCTAssertEqual(event.namespace, "lens")
+        XCTAssertEqual(event.playbackState, "q")
+        XCTAssertEqual(event.keys?.count, 2)
+        XCTAssertEqual(event.keys?["pod"] as? String, "mid-1")
+        XCTAssertEqual((event.keys?["endpoint"] as? NSNumber)?.intValue, 2)
+    }
+
+    func testDisposingANonLastHandleKeepsTheSessionTheLastOneQuitsItOnce() throws {
+        captureSink()
+        let player = NSObject()
+        let ads = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads", destinations: [ingest], heartbeatMs: 0, player: player))
+        let live = try Lens.join(
+            LensJoinOptions(
+                namespace: "live", destinations: [ingest], heartbeatMs: 0, player: player))
+        ads.startSession()
+        live.startSession()
+        ads.dispose()
+        XCTAssertNotNil(live.session)
+        XCTAssertEqual(delivered.count, 0)
+        live.dispose()
+        XCTAssertEqual(delivered.count, 1)
+        XCTAssertEqual(delivered[0].event.type, "ps")
+        XCTAssertEqual(delivered[0].event.playbackState, "q")
+    }
+
+    func testAfterAnEndTheNextBoundarySignalFromAnyHandleMintsFresh() throws {
+        captureSink()
+        let player = NSObject()
+        let ads = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads", destinations: [ingest], heartbeatMs: 0, player: player))
+        let live = try Lens.join(
+            LensJoinOptions(
+                namespace: "live", destinations: [ingest], heartbeatMs: 0, player: player))
+        let first = ads.startSession()
+        ads.endSession()
+        let second = live.startSession()
+        XCTAssertNotEqual(first.sessionId, second.sessionId)
+        // Ownership moved with the mint: now only live's endSession ends it.
+        live.endSession()
+        XCTAssertNil(live.session)
+    }
+
+    // MARK: source changes
+
+    func testAContinuedSessionKeepsTheSidAndEmitsCAndHOnlyWhenTheIdentityActuallyChanged() throws {
+        captureSink()
+        let player = NSObject()
+        let lens = try Lens.join(
+            LensJoinOptions(
+                namespace: "live", destinations: [ingest], heartbeatMs: 0, player: player))
+        let session = lens.startSession(LensStartSessionOptions(contentId: "movie-1"))
+
+        // Same content id, first hostname sighting — nothing changed yet.
+        lens.reportSourceChange(
+            LensSourceChange(newSession: false, contentId: "movie-1", hostname: "a.example.com"))
+        XCTAssertEqual(delivered.count, 0)
+
+        lens.reportSourceChange(
+            LensSourceChange(newSession: false, contentId: "movie-2", hostname: "b.example.com"))
+        XCTAssertEqual(delivered.map { $0.event.type }, ["c", "h"])
+        XCTAssertEqual(delivered[0].event.namespace, "lens")
+        XCTAssertEqual(delivered[0].event.contentId, "movie-2")
+        XCTAssertEqual(delivered[0].event.session.sessionId, session.sessionId)
+        XCTAssertEqual(delivered[1].event.namespace, "lens")
+        XCTAssertEqual(delivered[1].event.hostname, "b.example.com")
+
+        lens.emitCustom("fallback")
+        XCTAssertEqual(delivered[2].event.session.sessionId, session.sessionId)
+        XCTAssertEqual(delivered[2].event.contentId, "movie-2")
+    }
+
+    func testANewSessionRotatesTheSidQuittingTheReplacedSessionTheMinterKeepsOwnership() throws {
+        captureSink()
+        let player = NSObject()
+        let lens = try Lens.join(
+            LensJoinOptions(
+                namespace: "live", destinations: [ingest], heartbeatMs: 0, player: player))
+        let first = lens.startSession(LensStartSessionOptions(contentId: "movie-1"))
+        lens.reportSourceChange(LensSourceChange(newSession: true, contentId: "movie-2"))
+        XCTAssertEqual(delivered.count, 1)
+        XCTAssertEqual(delivered[0].event.type, "ps")
+        XCTAssertEqual(delivered[0].event.namespace, "lens")
+        XCTAssertEqual(delivered[0].event.playbackState, "q")
+        XCTAssertEqual(delivered[0].event.session.sessionId, first.sessionId)
+        let rolled = try XCTUnwrap(lens.session)
+        XCTAssertNotEqual(first.sessionId, rolled.sessionId)
+        lens.emitCustom("fallback")
+        XCTAssertEqual(delivered[1].event.session.sessionId, rolled.sessionId)
+        XCTAssertEqual(delivered[1].event.contentId, "movie-2")
+        lens.endSession()
+        XCTAssertNil(lens.session)
+    }
+
+    func testANonMinterNewSessionReportLeavesOwnershipWithTheMinter() throws {
+        captureSink()
+        let player = NSObject()
+        let ads = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads", destinations: [ingest], heartbeatMs: 0, player: player))
+        let live = try Lens.join(
+            LensJoinOptions(
+                namespace: "live", destinations: [ingest], heartbeatMs: 0, player: player))
+        let first = ads.startSession(LensStartSessionOptions(contentId: "movie-1"))
+        live.startSession()
+        live.reportSourceChange(LensSourceChange(newSession: true, contentId: "movie-2"))
+        let rolled = try XCTUnwrap(ads.session)
+        XCTAssertNotEqual(first.sessionId, rolled.sessionId)
+        live.endSession()
+        XCTAssertNotNil(ads.session)
+        ads.endSession()
+        XCTAssertNil(ads.session)
+        XCTAssertNil(live.session)
+    }
+
+    func testARepeatBoundarySignalQuitsTheReplacedSessionBeforeMintingTheNext() throws {
+        captureSink()
+        let player = NSObject()
+        let lens = try Lens.join(
+            LensJoinOptions(
+                namespace: "live", destinations: [ingest], heartbeatMs: 0, player: player))
+        let first = lens.startSession(LensStartSessionOptions(contentId: "movie-1"))
+        let second = lens.startSession(LensStartSessionOptions(contentId: "movie-2"))
+        XCTAssertNotEqual(first.sessionId, second.sessionId)
+        XCTAssertEqual(delivered.count, 1)
+        XCTAssertEqual(delivered[0].event.type, "ps")
+        XCTAssertEqual(delivered[0].event.namespace, "lens")
+        XCTAssertEqual(delivered[0].event.playbackState, "q")
+        XCTAssertEqual(delivered[0].event.session.sessionId, first.sessionId)
+    }
+
+    func testANonMinterContinuedSessionReportRidesTheMinterAsALensReportLikeTheQuit() throws {
+        captureSink()
+        let player = NSObject()
+        let adsIngest = LensDestination(url: "https://example.test/ads")
+        let ads = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads", destinations: [adsIngest], heartbeatMs: 0, player: player))
+        let live = try Lens.join(
+            LensJoinOptions(
+                namespace: "live", destinations: [ingest], heartbeatMs: 0, player: player))
+        let session = ads.startSession(LensStartSessionOptions(contentId: "movie-1"))
+        live.startSession()
+        live.reportSourceChange(LensSourceChange(newSession: false, contentId: "movie-2"))
+        XCTAssertEqual(delivered.count, 1)
+        XCTAssertEqual(delivered[0].destination.url, adsIngest.url)
+        XCTAssertEqual(delivered[0].event.type, "c")
+        XCTAssertEqual(delivered[0].event.namespace, "lens")
+        XCTAssertEqual(delivered[0].event.contentId, "movie-2")
+        XCTAssertEqual(delivered[0].event.session.sessionId, session.sessionId)
+        XCTAssertEqual(try XCTUnwrap(ads.session).sessionId, session.sessionId)
+    }
+
+    func testAContinuedSessionReportCarriesTheSessionCidNotAnOpenAdSwapAndNeedsAConsentingHandle()
+        throws
+    {
+        captureSink()
+        let lens = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads", destinations: [ingest], heartbeatMs: 0, player: NSObject()))
+        lens.startSession(LensStartSessionOptions(contentId: "movie-1"))
+        lens.emit(.adStart, payload: LensAdPayload(contentId: "ad-1"))
+        lens.reportSourceChange(LensSourceChange(newSession: false, contentId: "movie-2"))
+        XCTAssertEqual(delivered[1].event.type, "c")
+        XCTAssertEqual(delivered[1].event.contentId, "movie-2")
+        lens.setConsent(.denied)
+        lens.reportSourceChange(LensSourceChange(newSession: false, contentId: "movie-3"))
+        XCTAssertEqual(delivered.count, 2)
+    }
+
+    func testRejectsHostileInputsLoudlyBadHostname() throws {
+        let violations = captureViolations()
+        defer { Lens.usageViolation = { preconditionFailure($0) } }
+        let lens = try Lens.join(
+            LensJoinOptions(namespace: "live", heartbeatMs: 0, player: NSObject()))
+        lens.startSession()
+        for hostname in ["", String(repeating: "x", count: 129), "héte.example"] {
+            lens.reportSourceChange(LensSourceChange(newSession: false, hostname: hostname))
+        }
+        XCTAssertEqual(violations().count, 3)
+    }
+
+    private static func sn(_ body: String) -> Int? {
+        guard let range = body.range(of: #"(^|,)sn=(\d+)"#, options: .regularExpression) else {
+            return nil
+        }
+        return Int(body[range].drop { !$0.isNumber })
     }
 }

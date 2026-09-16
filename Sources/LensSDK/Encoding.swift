@@ -18,10 +18,12 @@ internal protocol ReportEncoder {
 
 internal enum Encoding {
     /// The spec keys Lens stamps; everything else in a report is a custom key.
-    static let specKeys: Set<String> = ["e", "cen", "ts", "sid", "sn", "v", "cid", "sf", "st"]
+    static let specKeys: Set<String> = [
+        "e", "cen", "ts", "sid", "sn", "v", "cid", "sf", "st", "h", "sta",
+    ]
 
     /// Spec keys whose values are spec tokens, never quoted on the CMCD wire.
-    static let tokenKeys: Set<String> = ["e", "sf", "st"]
+    static let tokenKeys: Set<String> = ["e", "sf", "st", "sta"]
 
     /// Lens-owned keys whose values are spec token vocabularies — bare on the CMCD wire.
     static let lensTokenKeys: Set<String> = ["p", "dc"]
@@ -91,6 +93,8 @@ internal enum Encoding {
         if let cid = event.contentId { report.append(("cid", cid)) }
         if let sf = event.streamingFormat { report.append(("sf", sf)) }
         if let st = event.streamType { report.append(("st", st)) }
+        if let h = event.hostname { report.append(("h", h)) }
+        if let sta = event.playbackState { report.append(("sta", sta)) }
         report.append(("sn", sn))
         // event mode is v2; request mode will use v1 syntax — never share this builder
         report.append(("v", 2))

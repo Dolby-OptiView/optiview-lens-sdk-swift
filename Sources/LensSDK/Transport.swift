@@ -81,6 +81,12 @@ internal enum TransportRuntime {
     nonisolated(unsafe) static var backoffBaseMs = defaultBackoffBaseMs
     nonisolated(unsafe) static var lifecycleFlush = true
 
+    // The transport-level edge is where the process's end is observed;
+    // sessions are handle-level state, so the session layer registers here to
+    // emit its quit reports before the final flush. Termination only — a
+    // background is a flush, never a session end.
+    nonisolated(unsafe) static var terminationNotifier: (() -> Void)?
+
     /// Retries and delayed re-flushes ride here — one queue for the process,
     /// so handles sharing a target coordinate their backoff.
     static let delayQueue = DispatchQueue(label: "lens-transport")
@@ -137,14 +143,31 @@ internal enum TransportRuntime {
         liveLock.lock()
         liveTransports.removeAll { $0.value == nil }
         liveTransports.append(WeakTransport(transport))
-        liveLock.unlock()
-        registerLifecycleObservers()
+        #if canImport(UIKit)
+            let install = !lifecycleObserved
+            lifecycleObserved = true
+            liveLock.unlock()
+            if install { installLifecycleObservers() }
+        #else
+            liveLock.unlock()
+        #endif
     }
 
     static func unregister(_ transport: Transport) {
         liveLock.lock()
-        defer { liveLock.unlock() }
         liveTransports.removeAll { $0.value == nil || $0.value === transport }
+        #if canImport(UIKit)
+            var stale: [NSObjectProtocol] = []
+            if liveTransports.isEmpty && lifecycleObserved {
+                lifecycleObserved = false
+                stale = lifecycleTokens
+                lifecycleTokens = []
+            }
+            liveLock.unlock()
+            for token in stale { NotificationCenter.default.removeObserver(token) }
+        #else
+            liveLock.unlock()
+        #endif
     }
 
     /// Everything pending on every live handle leaves now (app backgrounded).
@@ -261,26 +284,44 @@ internal enum TransportRuntime {
 
     // --- Lifecycle flushing (iOS/tvOS; the dev host has no UIKit and no cliffs) ---
 
-    private nonisolated(unsafe) static var lifecycleObserved = false
+    // The observers follow transport membership: installed on the live set's
+    // 0 -> 1 transition, removed with their tokens on the return to 0,
+    // reinstalled with the next transport. After the last dispose, an app
+    // background runs no SDK code. Both variables are guarded by `liveLock`
+    // — the transition and the set it watches must agree — and
+    // NotificationCenter is only ever called outside it.
+    #if canImport(UIKit)
+        private nonisolated(unsafe) static var lifecycleObserved = false
+        private nonisolated(unsafe) static var lifecycleTokens: [NSObjectProtocol] = []
 
-    private static func registerLifecycleObservers() {
-        #if canImport(UIKit)
-            policyLock.lock()
-            let first = !lifecycleObserved
-            lifecycleObserved = true
-            policyLock.unlock()
-            guard first else { return }
+        private static func installLifecycleObservers() {
             let center = NotificationCenter.default
-            center.addObserver(
-                forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: nil
-            ) { _ in backgroundFlush() }
-            center.addObserver(
-                forName: UIApplication.willTerminateNotification, object: nil, queue: nil
-            ) { _ in
-                if lifecycleFlush { flushAll() }
-            }
-        #endif
-    }
+            let tokens = [
+                center.addObserver(
+                    forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: nil
+                ) { _ in backgroundFlush() },
+                center.addObserver(
+                    forName: UIApplication.willTerminateNotification, object: nil, queue: nil
+                ) { _ in
+                    // Ending the session is not lifecycle flushing: a host
+                    // that opted out still gets its sessions ended here.
+                    terminationNotifier?()
+                    if lifecycleFlush {
+                        flushAll()
+                    }
+                },
+            ]
+            liveLock.lock()
+            // Keep only into an empty slot: a concurrent unregister may have
+            // emptied the live set (observed false), or a concurrent
+            // register/unregister/register cycle may have installed another
+            // pair first (slot taken) — either way ours are stale.
+            let keep = lifecycleObserved && lifecycleTokens.isEmpty
+            if keep { lifecycleTokens = tokens }
+            liveLock.unlock()
+            if !keep { for token in tokens { center.removeObserver(token) } }
+        }
+    #endif
 
     #if canImport(UIKit)
         /// Backgrounding suspends the process before URLSession callbacks run,
@@ -336,6 +377,20 @@ internal enum TransportRuntime {
         defer { snLock.unlock() }
         snRegistry = [:]
     }
+
+    static var liveTransportCountForTesting: Int {
+        liveLock.lock()
+        defer { liveLock.unlock() }
+        return liveTransports.compactMap(\.value).count
+    }
+
+    #if canImport(UIKit)
+        static var lifecycleObserverCountForTesting: Int {
+            liveLock.lock()
+            defer { liveLock.unlock() }
+            return lifecycleTokens.count
+        }
+    #endif
 
     static func resetDeliveryPolicyForTesting() {
         policyLock.lock()

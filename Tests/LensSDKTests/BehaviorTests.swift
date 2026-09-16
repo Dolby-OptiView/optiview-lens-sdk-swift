@@ -21,6 +21,7 @@ final class BehaviorTests: XCTestCase {
         TransportRuntime.postOverride = nil
         EnvironmentRuntime.override = nil
         Lens.nowForTesting = nil
+        Lens.sessionIdFactory = { UUID().uuidString.lowercased() }
         UserIdRuntime.resetForTesting()
         TransportRuntime.resetSnRegistryForTesting()
         Lens.resetConfigurationForTesting()
@@ -82,6 +83,7 @@ final class BehaviorTests: XCTestCase {
             TransportRuntime.resetSnRegistryForTesting()
             Lens.resetConfigurationForTesting()
             var handles: [String: LensHandle] = [:]
+            var players: [String: AnyObject] = [:]
 
             for step in fixture["script"] as! [[String: Any]] {
                 let op = step["op"] as! String
@@ -102,12 +104,33 @@ final class BehaviorTests: XCTestCase {
                                 backend == "disabled" ? .disabled : .production
                         ))
                 case "join":
+                    var player: AnyObject?
+                    if let name = step["player"] as? String {
+                        if players[name] == nil { players[name] = NSObject() }
+                        player = players[name]
+                    }
                     handles[step["handle"] as! String] = try Lens.join(
                         LensJoinOptions(
                             namespace: step["namespace"] as! String,
                             destinations: parseDestinations(
-                                step["destinations"] as? [[String: Any]])
+                                step["destinations"] as? [[String: Any]]),
+                            player: player
                         ))
+                case "sids":
+                    var queue = step["values"] as! [String]
+                    Lens.sessionIdFactory = { queue.removeFirst() }
+                case "reportSourceChange":
+                    handles[step["handle"] as! String]!
+                        .reportSourceChange(
+                            LensSourceChange(
+                                newSession: step["newSession"] as! Bool,
+                                contentId: step["contentId"] as? String,
+                                hostname: step["hostname"] as? String,
+                                streamingFormat: step["streamingFormat"] as? String
+                            ))
+                case "setHeartbeatPayload":
+                    handles[step["handle"] as! String]!
+                        .setHeartbeatPayload(payload(step))
                 case "startSession":
                     handles[step["handle"] as! String]!
                         .startSession(

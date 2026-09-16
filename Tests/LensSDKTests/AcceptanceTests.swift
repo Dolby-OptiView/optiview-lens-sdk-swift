@@ -71,15 +71,18 @@ final class AcceptanceTests: XCTestCase {
         lens.endSession()
 
         // Order by sn; POST arrival order is not guaranteed. The session opens
-        // with a liveness report, then the events.
-        let ingest = waitForRequests(6, path: "/ingest").sorted {
+        // with a liveness report, then the events, closed by the quit report.
+        let ingest = waitForRequests(7, path: "/ingest").sorted {
             sequenceNumber(in: $0.body) < sequenceNumber(in: $1.body)
         }
-        XCTAssertEqual(ingest.count, 6)
+        XCTAssertEqual(ingest.count, 7)
         XCTAssertTrue(ingest.allSatisfy { $0.contentType == "application/cmcd" })
         let bodies = ingest.map(\.body).joined(separator: "\n")
-        XCTAssertEqual(matches("e=([a-z]+)", in: bodies), ["t", "abs", "as", "ae", "ce", "abe"])
-        XCTAssertEqual(matches("sn=([0-9]+)", in: bodies), ["1", "2", "3", "4", "5", "6"])
+        XCTAssertEqual(
+            matches("e=([a-z]+)", in: bodies), ["t", "abs", "as", "ae", "ce", "abe", "ps"])
+        XCTAssertEqual(matches("sn=([0-9]+)", in: bodies), ["1", "2", "3", "4", "5", "6", "7"])
+        XCTAssertTrue(ingest.last!.body.contains("sta=q"))
+        XCTAssertTrue(ingest.last!.body.contains("com.dolby.optiview-ns=\"lens\""))
         XCTAssertEqual(Set(matches("sid=\"([^\"]+)\"", in: bodies)).count, 1)
         XCTAssertTrue(bodies.contains("com.dolby.optiview-ad=\"ad-123\""))
         XCTAssertTrue(bodies.contains("cen=\"adBreakAdded\""))
@@ -117,12 +120,12 @@ final class AcceptanceTests: XCTestCase {
         ads.endSession()
         live.endSession()
 
-        let ingest = waitForRequests(2, path: "/ingest")
+        let ingest = waitForRequests(4, path: "/ingest")
         let namespaces = Set(
             matches(
                 "com.dolby.optiview-ns=\"([a-z]+)\"", in: ingest.map(\.body).joined(separator: "\n")
             ))
-        XCTAssertEqual(namespaces, ["ads", "live"])
+        XCTAssertEqual(namespaces, ["ads", "live", "lens"])
 
         let adops = waitForRequests(1, path: "/adops")
         XCTAssertEqual(adops.count, 1)
