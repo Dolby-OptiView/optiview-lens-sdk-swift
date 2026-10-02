@@ -41,13 +41,16 @@ internal enum TransportRuntime {
         _developmentIngestUrl = nil
     }
 
-    static func builtInIngest(backend: EffectiveBackend) -> LensDestination? {
+    static func builtInIngest(
+        backend: EffectiveBackend,
+        ingestBatch: LensBatch?
+    ) -> LensDestination? {
         switch backend {
         case .production:
-            return LensDestination(url: productionIngestUrl, format: .cmcd)
+            return LensDestination(url: productionIngestUrl, format: .cmcd, batch: ingestBatch)
         case .development:
             // Unreachable without registration: `Lens.configure` gates it.
-            return LensDestination(url: developmentIngestUrl!, format: .cmcd)
+            return LensDestination(url: developmentIngestUrl!, format: .cmcd, batch: ingestBatch)
         case .disabled:
             return nil
         }
@@ -424,8 +427,8 @@ internal final class Transport {
     private let queues: [Queue]
     private var disposed = false
 
-    init(destinations: [LensDestination], backend: EffectiveBackend) {
-        let builtIn = TransportRuntime.builtInIngest(backend: backend)
+    init(destinations: [LensDestination], backend: EffectiveBackend, ingestBatch: LensBatch?) {
+        let builtIn = TransportRuntime.builtInIngest(backend: backend, ingestBatch: ingestBatch)
         self.queues = ((builtIn.map { [$0] } ?? []) + destinations)
             .enumerated()
             .map { Queue($0.element, isBuiltIn: builtIn != nil && $0.offset == 0) }

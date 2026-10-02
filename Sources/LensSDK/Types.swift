@@ -47,6 +47,13 @@ public struct LensJoinOptions {
     /// on its own — integrators never report it. Spec default 30000 ms; 0 turns
     /// it off; otherwise at least 1000 ms.
     public var heartbeatMs: Int64
+    /// Delivery hints for this handle's built-in OptiView ingest queue,
+    /// including heartbeats. Use `destinations[].batch` for extra destinations.
+    /// By default, each event is sent immediately. Ignored when the backend is
+    /// disabled. With `maxEvents` and no `maxDelayMs`, events wait until the
+    /// count is reached or the queue flushes on session end, dispose, or
+    /// lifecycle flush.
+    public var batch: LensBatch?
     /// The player this handle observes, as an opaque anchor (reference
     /// identity). Handles joining with the same player share one Lens-owned
     /// session: the first boundary signal mints it, later signals join it.
@@ -59,7 +66,8 @@ public struct LensJoinOptions {
         consent: LensConsent = .granted,
         strict: Bool = false,
         heartbeatMs: Int64 = 30_000,
-        player: AnyObject? = nil
+        player: AnyObject? = nil,
+        batch: LensBatch? = nil
     ) {
         self.namespace = namespace
         self.destinations = destinations
@@ -67,6 +75,7 @@ public struct LensJoinOptions {
         self.strict = strict
         self.heartbeatMs = heartbeatMs
         self.player = player
+        self.batch = batch
     }
 }
 
@@ -325,6 +334,7 @@ public struct LensDestinationFilter {
     }
 }
 
+/// Delivery hints, consumed by the transport: flush at maxEvents pending, or when the oldest event has waited maxDelayMs (0 = per event).
 public struct LensBatch {
     public var maxEvents: Int?
     public var maxDelayMs: Int64?

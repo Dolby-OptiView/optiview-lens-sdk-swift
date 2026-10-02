@@ -141,6 +141,21 @@ public enum Lens {
                 "Lens: heartbeatMs must be 0 (off) or at least \(Validation.minHeartbeatMs) milliseconds"
             )
         }
+        if let batch = options.batch {
+            if let maxEvents = batch.maxEvents {
+                guard maxEvents >= 1 else {
+                    throw LensError.invalidOptions(
+                        "Lens: batch.maxEvents must be a whole number >= 1")
+                }
+            }
+            if let maxDelayMs = batch.maxDelayMs {
+                guard (0...2_147_483_647).contains(maxDelayMs) else {
+                    throw LensError.invalidOptions(
+                        "Lens: batch.maxDelayMs must be a whole number of milliseconds from 0 to 2147483647"
+                    )
+                }
+            }
+        }
         _ = terminationHook
         return Handle(options: options, backend: lockBackend())
     }
@@ -261,7 +276,11 @@ public enum Lens {
         _ binding: Binding, minter: Handle, context: LensStartSessionOptions
     ) {
         // A repeat boundary signal rolls: the replaced session ends, so it quits.
-        if let replaced = binding.current { emitQuit(binding, replaced) }
+        if let replaced = binding.current {
+            emitQuit(binding, replaced)
+            let handles = binding.boundHandles
+            for handle in handles { handle.flushTransport() }
+        }
         binding.current = SessionState(
             session: LensSession(sessionId: context.sessionId ?? sessionIdFactory()),
             contentId: context.contentId,
@@ -385,7 +404,11 @@ public enum Lens {
         init(options: LensJoinOptions, backend: EffectiveBackend) {
             self.namespace = options.namespace
             self.strict = options.strict
-            self.transport = Transport(destinations: options.destinations, backend: backend)
+            self.transport = Transport(
+                destinations: options.destinations,
+                backend: backend,
+                ingestBatch: options.batch
+            )
             self.consent = options.consent
             let binding = Lens.bindingFor(options.player)
             self.binding = binding

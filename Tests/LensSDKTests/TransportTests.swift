@@ -280,7 +280,10 @@ final class TransportTests: XCTestCase {
         TransportRuntime.ingestOverride = nil
         TransportRuntime.postOverride = { url, _, _ in postedUrls.append(url) }
         try Lens.configure(LensConfigureOptions(backend: .disabled))
-        let lens = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
+        let lens = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads", heartbeatMs: 0,
+                batch: LensBatch(maxEvents: 10)))
         lens.startSession()
         lens.emit(.adStart)
 
@@ -415,6 +418,105 @@ final class TransportTests: XCTestCase {
         lens.emit(.adBreakEnd)
         lens.endSession()
         XCTAssertEqual(waitForRequests(2, path: "/batched").count, 2)
+    }
+
+    func testBatchesBuiltInIngestReportsAtMaxEvents() throws {
+        let lens = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads", heartbeatMs: 0,
+                batch: LensBatch(maxEvents: 3)))
+        lens.startSession()
+        lens.emit(.adStart)
+        lens.emit(.adEnd)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertEqual(ReceiverProtocol.snapshot().filter { $0.path == "/ingest" }.count, 0)
+
+        lens.emit(.adSkip)
+        let requests = waitForRequests(1, path: "/ingest")
+        RunLoop.current.run(until: Date().addingTimeInterval(0.15))
+        XCTAssertEqual(ReceiverProtocol.snapshot().filter { $0.path == "/ingest" }.count, 1)
+        XCTAssertEqual(requests[0].body.split(separator: "\n").count, 3)
+    }
+
+    func testFlushesBuiltInIngestAfterMaxDelayMs() throws {
+        let lens = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads", heartbeatMs: 0,
+                batch: LensBatch(maxEvents: 10, maxDelayMs: 200)))
+        lens.startSession()
+        lens.emit(.adStart)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertEqual(ReceiverProtocol.snapshot().filter { $0.path == "/ingest" }.count, 0)
+
+        let requests = waitForRequests(1, path: "/ingest")
+        XCTAssertTrue(requests[0].body.contains("e=as"))
+    }
+
+    func testFlushesPendingBuiltInIngestReportsOnEndSession() throws {
+        let lens = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads", heartbeatMs: 0,
+                batch: LensBatch(maxEvents: 10)))
+        lens.startSession()
+        lens.emit(.adStart)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertEqual(ReceiverProtocol.snapshot().filter { $0.path == "/ingest" }.count, 0)
+
+        lens.endSession()
+        let requests = waitForRequests(1, path: "/ingest")
+        XCTAssertEqual(requests[0].body.split(separator: "\n").count, 2)
+        XCTAssertTrue(requests[0].body.contains("e=as"))
+        XCTAssertTrue(requests[0].body.contains("e=ps"))
+    }
+
+    func testFlushesPendingBuiltInIngestBeforeARepeatedStartRollsTheSession() throws {
+        let lens = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads", heartbeatMs: 0,
+                batch: LensBatch(maxEvents: 10)))
+        lens.startSession()
+        let firstSessionId = try XCTUnwrap(lens.session?.sessionId)
+        lens.emit(.adStart)
+
+        lens.startSession()
+        let firstRequests = waitForRequests(1, path: "/ingest")
+        XCTAssertEqual(firstRequests.count, 1)
+        func fields(_ key: String, _ body: String) -> [String] {
+            body.split(separator: "\n").compactMap { line in
+                guard let range = line.range(of: "\(key)=") else { return nil }
+                return String(line[range.upperBound...].prefix(while: { $0 != "," }))
+            }
+        }
+        XCTAssertEqual(fields("e", firstRequests[0].body), ["as", "ps"])
+        XCTAssertEqual(
+            fields("sid", firstRequests[0].body),
+            ["\"\(firstSessionId)\"", "\"\(firstSessionId)\""])
+
+        let secondSessionId = try XCTUnwrap(lens.session?.sessionId)
+        XCTAssertNotEqual(firstSessionId, secondSessionId)
+        lens.emit(.adEnd)
+        lens.endSession()
+
+        let requests = waitForRequests(2, path: "/ingest")
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(fields("e", requests[1].body), ["ae", "ps"])
+        XCTAssertEqual(
+            fields("sid", requests[1].body),
+            ["\"\(secondSessionId)\"", "\"\(secondSessionId)\""])
+    }
+
+    func testOpeningHeartbeatWaitsInTheBuiltInIngestBatch() throws {
+        let lens = try Lens.join(
+            LensJoinOptions(
+                namespace: "ads", heartbeatMs: 1_000,
+                batch: LensBatch(maxEvents: 10)))
+        lens.startSession()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertEqual(ReceiverProtocol.snapshot().filter { $0.path == "/ingest" }.count, 0)
+
+        lens.flush()
+        let requests = waitForRequests(1, path: "/ingest")
+        XCTAssertTrue(requests[0].body.contains("e=t"))
     }
 
     func testNumbersReportsPerDestinationAndRestartsSnWhenTheSessionRolls() throws {

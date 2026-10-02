@@ -628,6 +628,44 @@ final class LensTests: XCTestCase {
         }
     }
 
+    func testValidatesBatchValuesAndAcceptsItsBoundaryValues() throws {
+        let invalid: [(LensBatch, String)] = [
+            (
+                LensBatch(maxEvents: 0),
+                "Lens: batch.maxEvents must be a whole number >= 1"
+            ),
+            (
+                LensBatch(maxEvents: -1),
+                "Lens: batch.maxEvents must be a whole number >= 1"
+            ),
+            (
+                LensBatch(maxDelayMs: -1),
+                "Lens: batch.maxDelayMs must be a whole number of milliseconds from 0 to 2147483647"
+            ),
+            (
+                LensBatch(maxDelayMs: 2_147_483_648),
+                "Lens: batch.maxDelayMs must be a whole number of milliseconds from 0 to 2147483647"
+            ),
+        ]
+        for (batch, message) in invalid {
+            XCTAssertThrowsError(
+                try Lens.join(LensJoinOptions(namespace: "ads", batch: batch))
+            ) { error in
+                XCTAssertEqual(error as? LensError, .invalidOptions(message))
+            }
+        }
+
+        let valid = [
+            LensBatch(maxEvents: 1),
+            LensBatch(maxDelayMs: 0),
+            LensBatch(maxDelayMs: 2_147_483_647),
+            LensBatch(),
+        ]
+        for batch in valid {
+            try Lens.join(LensJoinOptions(namespace: "ads", batch: batch)).dispose()
+        }
+    }
+
     func testTheLensNamespaceIsReservedAndIntegratorsCannotForgeATimeInterval() throws {
         captureSink()
         XCTAssertThrowsError(try Lens.join(LensJoinOptions(namespace: "lens")))
