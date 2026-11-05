@@ -11,19 +11,31 @@ internal struct JsonEncoder: ReportEncoder {
 
     private func encodeReport(_ report: [(String, Any)]) -> String {
         let fields = report.map { key, value -> String in
-            let encoded: String
-            if let flag = value as? Bool {
-                encoded = flag ? "true" : "false"
-            } else if let token = value as? LensToken {
-                encoded = "\"\(escape(token.value))\""
-            } else if let text = value as? String {
-                encoded = "\"\(escape(text))\""
-            } else {
-                encoded = Encoding.numberText(value)
-            }
-            return "\"\(escape(key))\":\(encoded)"
+            "\"\(escape(key))\":\(encodeValue(value))"
         }
         return "{" + fields.joined(separator: ",") + "}"
+    }
+
+    /// An inner list is an array of `{ value, ot }`, `ot` absent when unsplit.
+    private func encodeValue(_ value: Any) -> String {
+        switch value {
+        case let flag as Bool:
+            return flag ? "true" : "false"
+        case let token as LensToken:
+            return "\"\(escape(token.value))\""
+        case let text as String:
+            return "\"\(escape(text))\""
+        case let items as [InnerListItem]:
+            let members = items.map { item in
+                "{\"value\":\(Encoding.numberText(item.value))"
+                    + (item.ot.map { ",\"ot\":\"\(escape($0))\"" } ?? "") + "}"
+            }
+            return "[" + members.joined(separator: ",") + "]"
+        case let strings as [String]:
+            return "[" + strings.map { "\"\(escape($0))\"" }.joined(separator: ",") + "]"
+        default:
+            return Encoding.numberText(value)
+        }
     }
 
     private func escape(_ value: String) -> String {

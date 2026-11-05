@@ -146,6 +146,9 @@ final class TransportTests: XCTestCase {
         let root = try JSONSerialization.jsonObject(with: data) as! [String: Any]
         let cases = root["cases"] as! [[String: Any]]
         XCTAssertGreaterThan(cases.count, 0)
+        // JSONSerialization forgets key order, and a JSON destination shows
+        // the player keys in the order Lens set them: read it off the text.
+        var statusOrders = Self.statusKeyOrders(String(decoding: data, as: UTF8.self))
 
         for fixture in cases {
             let name = fixture["name"] as! String
@@ -157,6 +160,14 @@ final class TransportTests: XCTestCase {
                 let session = raw["session"] as! [String: Any]
                 let keys = (raw["keys"] as? [String: Any]).map { parsed -> LensEventKeys in
                     parsed.mapValues(Self.normalizeJsonValue)
+                }
+                var status: StatusKeys?
+                if let raw = raw["status"] as? [String: Any] {
+                    var keys = StatusKeys()
+                    for key in statusOrders.removeFirst() {
+                        keys[key] = Self.statusValue(raw[key]!)
+                    }
+                    status = keys
                 }
                 let sid = session["sessionId"] as! String
                 let sn = (counters[sid] ?? 0) + 1
@@ -172,7 +183,8 @@ final class TransportTests: XCTestCase {
                     streamingFormat: raw["streamingFormat"] as? String,
                     streamType: raw["streamType"] as? String,
                     hostname: raw["hostname"] as? String,
-                    playbackState: raw["playbackState"] as? String
+                    playbackState: raw["playbackState"] as? String,
+                    status: status
                 )
                 return Encoding.toReport(event, sn, environment, userId)
             }
@@ -182,6 +194,62 @@ final class TransportTests: XCTestCase {
             XCTAssertEqual(contentType, expected["contentType"] as! String, name)
             XCTAssertEqual(body, expected["body"] as! String, name)
         }
+    }
+
+    /// The key order of every `status` object in the fixture text, in file order.
+    private static func statusKeyOrders(_ text: String) -> [[String]] {
+        var orders: [[String]] = []
+        var rest = Substring(text)
+        while let marker = rest.range(of: "\"status\":") {
+            rest = rest[marker.upperBound...]
+            var keys: [String] = []
+            var depth = 0
+            var inString = false
+            var escaped = false
+            var token = ""
+            var lastString = ""
+            for character in rest {
+                if inString {
+                    if escaped {
+                        escaped = false
+                    } else if character == "\\" {
+                        escaped = true
+                    } else if character == "\"" {
+                        inString = false
+                        lastString = token
+                    } else {
+                        token.append(character)
+                    }
+                    continue
+                }
+                switch character {
+                case "\"":
+                    inString = true
+                    token = ""
+                case ":" where depth == 1: keys.append(lastString)
+                case "{", "[": depth += 1
+                case "}", "]": depth -= 1
+                default: break
+                }
+                if depth == 0 && (character == "}" || character == "]") { break }
+            }
+            orders.append(keys)
+        }
+        return orders
+    }
+
+    /// A fixture's player key, typed as Lens reports it.
+    private static func statusValue(_ value: Any) -> StatusValue {
+        if let number = value as? NSNumber {
+            return CFGetTypeID(number) == CFBooleanGetTypeID()
+                ? .flag(number.boolValue) : .number(number.doubleValue)
+        }
+        if let strings = value as? [String] { return .strings(strings) }
+        let items = value as! [[String: Any]]
+        return .list(
+            items.map {
+                InnerListItem(($0["value"] as! NSNumber).doubleValue, ot: $0["ot"] as? String)
+            })
     }
 
     /// JSONSerialization gives NSNumber for both booleans and numbers — split them apart.
@@ -771,16 +839,16 @@ final class TransportTests: XCTestCase {
         func testLifecycleObserversFollowTheLiveSet() throws {
             let first = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
             let second = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
-            XCTAssertEqual(TransportRuntime.lifecycleObserverCountForTesting, 2)
+            XCTAssertEqual(TransportRuntime.lifecycleObserverCountForTesting, 3)
 
             first.dispose()
-            XCTAssertEqual(TransportRuntime.lifecycleObserverCountForTesting, 2)
+            XCTAssertEqual(TransportRuntime.lifecycleObserverCountForTesting, 3)
             second.dispose()
             XCTAssertEqual(TransportRuntime.lifecycleObserverCountForTesting, 0)
 
             // The next transport reinstalls the observers.
             let third = try Lens.join(LensJoinOptions(namespace: "ads", heartbeatMs: 0))
-            XCTAssertEqual(TransportRuntime.lifecycleObserverCountForTesting, 2)
+            XCTAssertEqual(TransportRuntime.lifecycleObserverCountForTesting, 3)
             third.dispose()
         }
 
@@ -802,12 +870,14 @@ final class TransportTests: XCTestCase {
                 name: UIApplication.didEnterBackgroundNotification, object: nil)
             XCTAssertEqual(waitForRequests(1, path: "/batched").count, 1)
 
+            // The last dispose sends the session's quit, then nothing more runs.
             lens.dispose()
+            XCTAssertEqual(waitForRequests(2, path: "/batched").count, 2)
             NotificationCenter.default.post(
                 name: UIApplication.didEnterBackgroundNotification, object: nil)
             RunLoop.current.run(until: Date().addingTimeInterval(0.1))
             XCTAssertEqual(
-                ReceiverProtocol.snapshot().filter { $0.path == "/batched" }.count, 1)
+                ReceiverProtocol.snapshot().filter { $0.path == "/batched" }.count, 2)
         }
     #endif
 }

@@ -90,6 +90,11 @@ internal enum TransportRuntime {
     // background is a flush, never a session end.
     nonisolated(unsafe) static var terminationNotifier: (() -> Void)?
 
+    // Players report the app moving to the background and back (`b`, `bg`),
+    // so the session layer hears those edges here too — before the
+    // background flush, so the report rides it.
+    nonisolated(unsafe) static var visibilityNotifier: ((_ hidden: Bool) -> Void)?
+
     /// Retries and delayed re-flushes ride here — one queue for the process,
     /// so handles sharing a target coordinate their backoff.
     static let delayQueue = DispatchQueue(label: "lens-transport")
@@ -189,6 +194,16 @@ internal enum TransportRuntime {
                 .takeUnretainedValue() as? UIApplication
         }
     #endif
+
+    /// Whether the app is in the background; nil without a UIKit application.
+    /// Main queue only, as UIKit requires.
+    static var applicationInBackground: Bool? {
+        #if canImport(UIKit)
+            return sharedApplication.map { $0.applicationState == .background }
+        #else
+            return nil
+        #endif
+    }
 
     static func post(url: String, body: String, contentType: String) {
         guard let target = URL(string: url) else { return }
@@ -302,7 +317,13 @@ internal enum TransportRuntime {
             let tokens = [
                 center.addObserver(
                     forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: nil
-                ) { _ in backgroundFlush() },
+                ) { _ in
+                    visibilityNotifier?(true)
+                    backgroundFlush()
+                },
+                center.addObserver(
+                    forName: UIApplication.willEnterForegroundNotification, object: nil, queue: nil
+                ) { _ in visibilityNotifier?(false) },
                 center.addObserver(
                     forName: UIApplication.willTerminateNotification, object: nil, queue: nil
                 ) { _ in

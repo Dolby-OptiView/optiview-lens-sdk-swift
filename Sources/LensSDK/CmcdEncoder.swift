@@ -46,17 +46,35 @@ internal struct CmcdEncoder: ReportEncoder {
             }
             .sorted { $0.key < $1.key }
         let sessionId = report.first { $0.0 == "sid" }?.1 as? String ?? ""
-        return wire.map { short, key, value -> String in
+        return wire.compactMap { short, key, value -> String? in
             // spec tokens, never quoted
             if Encoding.tokenKeys.contains(key) { return "\(key)=\(value)" }
-            if Encoding.specKeys.contains(key) {
-                guard let text = value as? String else { return "\(key)=\(value)" }
-                return "\(key)=\"\(escape(text))\""
-            }
+            if Encoding.specKeys.contains(key) { return specPair(key, value) }
             // Lens-owned token vocabularies ride bare too
             if Encoding.lensTokenKeys.contains(short) { return "\(key)=\(value)" }
             return customPair(key, short, sessionId, value)
         }.joined(separator: ",")
+    }
+
+    /// Registered keys as the spec types them, matching CML on web: inner
+    /// lists as `(4200;v 256;a)`, a true boolean bare and a false one omitted,
+    /// string lists as `("a" "b")`, strings quoted.
+    private func specPair(_ key: String, _ value: Any) -> String? {
+        switch value {
+        case let flag as Bool:
+            return flag ? key : nil
+        case let text as String:
+            return "\(key)=\"\(escape(text))\""
+        case let items as [InnerListItem]:
+            let members = items.map { item in
+                Encoding.numberText(item.value) + (item.ot.map { ";\($0)" } ?? "")
+            }
+            return "\(key)=(\(members.joined(separator: " ")))"
+        case let strings as [String]:
+            return "\(key)=(\(strings.map { "\"\(escape($0))\"" }.joined(separator: " ")))"
+        default:
+            return "\(key)=\(Encoding.numberText(value))"
+        }
     }
 
     /// Custom values MUST be STRING or TOKEN (CTA-5004-B): booleans and

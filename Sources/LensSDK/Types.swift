@@ -54,11 +54,14 @@ public struct LensJoinOptions {
     /// count is reached or the queue flushes on session end, dispose, or
     /// lifecycle flush.
     public var batch: LensBatch?
-    /// The player this handle observes, as an opaque anchor (reference
-    /// identity). Handles joining with the same player share one Lens-owned
-    /// session: the first boundary signal mints it, later signals join it.
-    /// Without an anchor the handle keeps today's independent sessions.
-    public var player: AnyObject?
+    /// The player this handle observes, through its adapter — compared by
+    /// identity, so wrap a player once and hand the same adapter to every SDK.
+    /// Lens then owns the session: it watches the player, reports playback
+    /// state and the player's CMCD keys, and starts a session at the first
+    /// play request on each source and ends it itself.
+    /// Handles naming the same adapter share that session. Without one, the
+    /// handle runs its own sessions through `startSession`/`endSession`.
+    public var player: (any LensPlayerAdapter)?
 
     public init(
         namespace: String,
@@ -66,7 +69,7 @@ public struct LensJoinOptions {
         consent: LensConsent = .granted,
         strict: Bool = false,
         heartbeatMs: Int64 = 30_000,
-        player: AnyObject? = nil,
+        player: (any LensPlayerAdapter)? = nil,
         batch: LensBatch? = nil
     ) {
         self.namespace = namespace
@@ -104,25 +107,32 @@ public struct LensSourceChange {
 }
 
 public protocol LensHandle: AnyObject {
-    /// Temporary session-control door: the integrator tells Lens when a viewing
-    /// session starts/ends. Starting while one is active rolls it (new sid).
-    /// The player-adapter phase will absorb this into automatic session management.
+    /// Temporary session-control door for handles joined without a `player`:
+    /// the integrator tells Lens when a viewing session starts. Starting while
+    /// one is active rolls it (new sid). With a `player`, Lens owns the session
+    /// and this warns and returns the current one — or, between sessions, a
+    /// placeholder no report carries, as a disposed handle does; read `session`
+    /// instead.
     @discardableResult
     func startSession(_ options: LensStartSessionOptions) -> LensSession
+    /// Ends this handle's session; with a `player`, warns and does nothing.
     func endSession()
     /// The active session, or nil between sessions.
     var session: LensSession? { get }
-    /// Report that the playback source changed. `newSession: false` keeps the
-    /// session — the sid survives, the context updates, and the spec's own
-    /// change events (`c`, `h`) fire only for what actually changed.
-    /// `newSession: true` rotates the sid, exactly like starting over. Never
-    /// implement a same-session change as `endSession()` + `startSession()`:
-    /// that splits the session and resets `sn` — the one thing it must not do.
+    /// Report that the playback source changed, for handles without a
+    /// `player`; with one, Lens observes the source and this warns.
+    /// `newSession: false` keeps the session — the sid survives, the context
+    /// updates, and the spec's own change events (`c`, `h`) fire only for what
+    /// actually changed. `newSession: true` rotates the sid, exactly like
+    /// starting over. Never implement a same-session change as `endSession()`
+    /// + `startSession()`: that splits the session and resets `sn` — the one
+    /// thing it must not do.
     func reportSourceChange(_ change: LensSourceChange)
     /// Report a standard CMCD event. The payload type follows the token:
     /// free-form events take `LensPayload`; spec-shaped events get
-    /// compile-checked typed payloads. Dropped when no session is active or
-    /// consent is denied; registered CMCD names inside `custom` hit a
+    /// compile-checked typed payloads. Dropped when consent is denied, or when
+    /// no session is active — on a handle joined with a `player`, held instead
+    /// until playback starts one. Registered CMCD names inside `custom` hit a
     /// fatal precondition.
     func emit<P: LensEventPayload>(_ type: LensEventType<P>, payload: P?)
     /// Report a custom event — anything the spec has no type for. Lowered to the
@@ -380,16 +390,18 @@ public struct LensEvent {
     public let streamingFormat: String?
     /// Stream type (`st`), from the session.
     public let streamType: String?
-    /// The new hostname (spec `h`); present only on hostname-change events.
+    /// The serving hostname (spec `h`), on hostname-change events and every report of a player session.
     public let hostname: String?
-    /// Playback state (spec `sta`); Lens-owned — only quit reports carry it.
+    /// Playback state (spec `sta`); Lens-owned — the quit report and the reports of a player session carry it.
     public let playbackState: String?
+    /// The other CMCD keys Lens reads from the player adapter or derives from its facts.
+    internal let status: StatusKeys?
 
     internal init(
         type: String, customName: String?, namespace: String, keys: LensEventKeys?,
         timestamp: Int64, session: LensSession,
         contentId: String? = nil, streamingFormat: String? = nil, streamType: String? = nil,
-        hostname: String? = nil, playbackState: String? = nil
+        hostname: String? = nil, playbackState: String? = nil, status: StatusKeys? = nil
     ) {
         self.type = type
         self.customName = customName
@@ -402,9 +414,65 @@ public struct LensEvent {
         self.streamType = streamType
         self.hostname = hostname
         self.playbackState = playbackState
+        self.status = status
     }
 }
 
 public enum LensError: Error, Equatable {
     case invalidOptions(String)
+}
+
+/// A CMCD inner-list member: one value per object type (`ot`), or a single value without one.
+internal struct InnerListItem: Equatable {
+    let value: Double
+    let ot: String?
+
+    init(_ value: Double, ot: String? = nil) {
+        self.value = value
+        self.ot = ot
+    }
+}
+
+/// A registered CMCD key's value, as reported.
+internal enum StatusValue: Equatable {
+    case number(Double)
+    case flag(Bool)
+    case list([InnerListItem])
+    case strings([String])
+}
+
+/// Registered CMCD keys and their values, kept in the order they were first
+/// set — the order a JSON destination sees, as on web.
+internal struct StatusKeys: Equatable {
+    private(set) var entries: [(key: String, value: StatusValue)] = []
+
+    var isEmpty: Bool { entries.isEmpty }
+
+    subscript(key: String) -> StatusValue? {
+        get { entries.first { $0.key == key }?.value }
+        set {
+            let index = entries.firstIndex { $0.key == key }
+            switch (index, newValue) {
+            case (let index?, let value?): entries[index].value = value
+            case (let index?, nil): entries.remove(at: index)
+            case (nil, let value?): entries.append((key, value))
+            case (nil, nil): break
+            }
+        }
+    }
+
+    subscript(key: CmcdKey) -> StatusValue? {
+        get { self[key.rawValue] }
+        set { self[key.rawValue] = newValue }
+    }
+
+    /// `other`'s keys win; a key already here keeps its place.
+    mutating func merge(_ other: StatusKeys) {
+        for (key, value) in other.entries { self[key] = value }
+    }
+
+    static func == (lhs: StatusKeys, rhs: StatusKeys) -> Bool {
+        lhs.entries.map(\.key) == rhs.entries.map(\.key)
+            && lhs.entries.map(\.value) == rhs.entries.map(\.value)
+    }
 }

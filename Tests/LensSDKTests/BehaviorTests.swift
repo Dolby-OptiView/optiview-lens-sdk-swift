@@ -16,6 +16,7 @@ final class BehaviorTests: XCTestCase {
     private let plainEventTypes: [String: LensEventType<LensPayload>] = [
         "abs": .adBreakStart, "abe": .adBreakEnd,
     ]
+    private let defaultAppHidden = Lens.appHidden
 
     override func tearDown() {
         TransportRuntime.postOverride = nil
@@ -23,6 +24,7 @@ final class BehaviorTests: XCTestCase {
         Lens.nowForTesting = nil
         Lens.sessionIdFactory = { UUID().uuidString.lowercased() }
         UserIdRuntime.resetForTesting()
+        Lens.appHidden = defaultAppHidden
         TransportRuntime.resetSnRegistryForTesting()
         Lens.resetConfigurationForTesting()
         super.tearDown()
@@ -83,7 +85,18 @@ final class BehaviorTests: XCTestCase {
             TransportRuntime.resetSnRegistryForTesting()
             Lens.resetConfigurationForTesting()
             var handles: [String: LensHandle] = [:]
-            var players: [String: AnyObject] = [:]
+            var players: [String: FakePlayer] = [:]
+            func player(_ step: [String: Any]) -> FakePlayer {
+                let name = step["player"] as! String
+                if let existing = players[name] { return existing }
+                let created = FakePlayer()
+                players[name] = created
+                return created
+            }
+            // The app starts in the foreground; `page` steps send it to the
+            // background and back, as the web page's visibility does there.
+            var appHidden = false
+            Lens.appHidden = { appHidden }
 
             for step in fixture["script"] as! [[String: Any]] {
                 let op = step["op"] as! String
@@ -104,17 +117,12 @@ final class BehaviorTests: XCTestCase {
                                 backend == "disabled" ? .disabled : .production
                         ))
                 case "join":
-                    var player: AnyObject?
-                    if let name = step["player"] as? String {
-                        if players[name] == nil { players[name] = NSObject() }
-                        player = players[name]
-                    }
                     handles[step["handle"] as! String] = try Lens.join(
                         LensJoinOptions(
                             namespace: step["namespace"] as! String,
                             destinations: parseDestinations(
                                 step["destinations"] as? [[String: Any]]),
-                            player: player
+                            player: step["player"] == nil ? nil : player(step)
                         ))
                 case "sids":
                     var queue = step["values"] as! [String]
@@ -158,6 +166,25 @@ final class BehaviorTests: XCTestCase {
                         .setConsent((step["consent"] as! String) == "denied" ? .denied : .granted)
                 case "dispose":
                     handles[step["handle"] as! String]!.dispose()
+                case "playerSnapshot":
+                    PlayerFixture.apply(
+                        snapshot: step["values"] as! [String: Any], to: &player(step).snapshotValues
+                    )
+                case "playerChange":
+                    let target = player(step)
+                    target.change {
+                        PlayerFixture.apply(
+                            properties: step["properties"] as! [String: Any], to: &$0)
+                    }
+                case "playerSource":
+                    player(step).load(
+                        PlayerFixture.source(step["source"]),
+                        continuation: step["continuation"] as? Bool ?? false)
+                case "playerFact":
+                    player(step).fire(PlayerFixture.fact(step["fact"] as! [String: Any]))
+                case "page":
+                    appHidden = step["hidden"] as! Bool
+                    PlayerObserver.appVisibilityChanged(hidden: appHidden)
                 default:
                     XCTFail("unknown op \(op) in \(name)")
                 }

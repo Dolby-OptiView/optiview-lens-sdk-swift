@@ -18,12 +18,11 @@ internal protocol ReportEncoder {
 
 internal enum Encoding {
     /// The spec keys Lens stamps; everything else in a report is a custom key.
-    static let specKeys: Set<String> = [
-        "e", "cen", "ts", "sid", "sn", "v", "cid", "sf", "st", "h", "sta",
-    ]
+    static let specKeys = Set(CmcdKey.allCases.map(\.rawValue))
 
     /// Spec keys whose values are spec tokens, never quoted on the CMCD wire.
-    static let tokenKeys: Set<String> = ["e", "sf", "st", "sta"]
+    static let tokenKeys = Set(
+        [CmcdKey.event, .streamFormat, .streamType, .state].map(\.rawValue))
 
     /// Lens-owned keys whose values are spec token vocabularies — bare on the CMCD wire.
     static let lensTokenKeys: Set<String> = ["p", "dc"]
@@ -32,7 +31,7 @@ internal enum Encoding {
     /// expands back to the full value (spec §2, §4.2). Mirrors `values` in
     /// `registry/keys/lens.json`, inverted; the vocabulary suite pins it there.
     static let tokenAbbreviations: [String: [String: String]] = [
-        "p": ["web": "w", "android": "a", "ios": "i", "tvos": "tv"],
+        "p": ["web": "w", "android": "a", "ios": "i", "tvos": "tv", "roku": "r"],
         "dc": ["desktop": "d", "mobile": "m", "tablet": "t", "tv": "tv"],
     ]
 
@@ -95,6 +94,14 @@ internal enum Encoding {
         if let st = event.streamType { report.append(("st", st)) }
         if let h = event.hostname { report.append(("h", h)) }
         if let sta = event.playbackState { report.append(("sta", sta)) }
+        for (key, value) in event.status?.entries ?? [] {
+            switch value {
+            case .number(let number): report.append((key, number))
+            case .flag(let flag): report.append((key, flag))
+            case .list(let items): report.append((key, items))
+            case .strings(let strings): report.append((key, strings))
+            }
+        }
         report.append(("sn", sn))
         // event mode is v2; request mode will use v1 syntax — never share this builder
         report.append(("v", 2))
