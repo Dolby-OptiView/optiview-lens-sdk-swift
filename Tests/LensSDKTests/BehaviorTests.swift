@@ -86,10 +86,18 @@ final class BehaviorTests: XCTestCase {
             Lens.resetConfigurationForTesting()
             var handles: [String: LensHandle] = [:]
             var players: [String: FakePlayer] = [:]
+            var keys: [String: NSObject] = [:]
+            /// A plain player object handles join with as their key.
+            func key(_ name: String) -> NSObject {
+                if let existing = keys[name] { return existing }
+                let created = NSObject()
+                keys[name] = created
+                return created
+            }
             func player(_ step: [String: Any]) -> FakePlayer {
                 let name = step["player"] as! String
                 if let existing = players[name] { return existing }
-                let created = FakePlayer()
+                let created = FakePlayer(target: (step["target"] as? String).map(key))
                 players[name] = created
                 return created
             }
@@ -122,7 +130,8 @@ final class BehaviorTests: XCTestCase {
                             namespace: step["namespace"] as! String,
                             destinations: parseDestinations(
                                 step["destinations"] as? [[String: Any]]),
-                            player: step["player"] == nil ? nil : player(step)
+                            player: step["player"] != nil
+                                ? player(step) : (step["key"] as? String).map(key)
                         ))
                 case "sids":
                     var queue = step["values"] as! [String]

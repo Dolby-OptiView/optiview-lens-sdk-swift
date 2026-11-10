@@ -5,6 +5,12 @@ import Foundation
 /// and draining would never end.
 private let maxQueuedFacts = 64
 
+/// The playback state one observer leaves to the next adapter's on the same player.
+internal struct PlaybackHandover {
+    let playback: Playback
+    let source: LensPlayerSource?
+}
+
 /// The wiring between one player and its binding. It talks to the adapter
 /// (the subscription and snapshot reads, on the main queue only, never while
 /// the binding's lock is held) and to the app's visibility, and it decides
@@ -13,14 +19,14 @@ private let maxQueuedFacts = 64
 /// leaves to its `Playback`, and hands the reports that returns to the
 /// binding to send.
 internal final class PlayerObserver {
-    let playback = Playback(now: { Double(Lens.now()) })
+    let playback: Playback
     private weak var binding: Binding?
-    private let adapter: any LensPlayerAdapter
+    let adapter: any LensPlayerAdapter
 
     // Guarded by the binding's lock.
     private var unsubscribe: (() -> Void)?
     /// Set by the first fact; the contract makes that `initial`, and any later one a repeat.
-    private var initialized = false
+    private var initialized: Bool
     /// The player's source, kept to restart a session on it after one ended.
     private var source: LensPlayerSource?
     /// The app's visibility was known at attach, so its changes count.
@@ -34,9 +40,20 @@ internal final class PlayerObserver {
     /// Facts queued in the current turn, against `maxQueuedFacts`.
     private var queuedThisTurn = 0
 
-    init(binding: Binding, adapter: any LensPlayerAdapter) {
+    /// With a `handover`, this observer replaces another on the same player and
+    /// continues its playback: the next adapter's first `initial` is a repeat.
+    init(binding: Binding, adapter: any LensPlayerAdapter, handover: PlaybackHandover? = nil) {
         self.binding = binding
         self.adapter = adapter
+        self.playback = handover?.playback ?? Playback(now: { Double(Lens.now()) })
+        self.initialized = handover != nil
+        self.source = handover?.source
+    }
+
+    /// What the next adapter's observer continues from, once this one is detached. Under the lock.
+    func handover() -> PlaybackHandover {
+        playback.handover()
+        return PlaybackHandover(playback: playback, source: source)
     }
 
     /// On the first handle, on the main queue: subscribe; the adapter's
@@ -197,7 +214,16 @@ internal final class PlayerObserver {
         initialized = true
         playback.reset(properties)
         source = usableSource(next)
-        if let source { startSession(source, lateAttach: true) }
+        guard let source, let binding else { return }
+        if binding.current != nil {
+            // A session the handles started on this player's key: Lens takes it
+            // over on its `sid`; the player's state joins as on a late attach.
+            let reports = playback.begin(source, lateAttach: true)
+            binding.continue(sessionContext(for: source))
+            binding.reportAll(reports)
+            return
+        }
+        startSession(source, lateAttach: true)
     }
 
     private func sourceChanged(
@@ -246,13 +272,16 @@ internal final class PlayerObserver {
     /// that was played), else a later fact. A preload is held until then.
     private func startSession(_ source: LensPlayerSource, lateAttach: Bool) {
         guard let binding else { return }
-        let context = sourceContext(source)
-        binding.await(
-            SessionContext(
-                contentId: context.contentId,
-                streamingFormat: context.streamingFormat?.rawValue,
-                streamType: playback.streamType()?.rawValue,
-                hostname: context.hostname))
+        binding.await(sessionContext(for: source))
         binding.reportAll(playback.begin(source, lateAttach: lateAttach))
+    }
+
+    private func sessionContext(for source: LensPlayerSource) -> SessionContext {
+        let context = sourceContext(source)
+        return SessionContext(
+            contentId: context.contentId,
+            streamingFormat: context.streamingFormat?.rawValue,
+            streamType: playback.streamType()?.rawValue,
+            hostname: context.hostname)
     }
 }

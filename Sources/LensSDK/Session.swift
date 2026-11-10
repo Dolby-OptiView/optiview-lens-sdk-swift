@@ -68,11 +68,16 @@ private struct Held {
 private let maxHeld = 100
 
 /// The handles that share one session, and that session. Every handle joined
-/// with the same player adapter is bound to one binding — that is how two
-/// SDKs on one player report into one `sid` without knowing of each other —
-/// and a handle without a player gets a binding of its own. The binding is
-/// where a session is started, continued and ended, and where Lens's own
-/// reports are built.
+/// on the same player — the key, as a plain object or as an adapter's
+/// `target` — is bound to one binding; that is how two SDKs on one player
+/// report into one `sid` without knowing of each other. A handle without a
+/// player gets a binding of its own. The binding is where a session is
+/// started, continued and ended, and where Lens's own reports are built.
+///
+/// The first adapter joined is the one Lens observes; others join the session
+/// unobserved, and the next in join order takes over when the observed one's
+/// last handle leaves. Without any adapter the handles drive the session
+/// themselves.
 ///
 /// Everything here is guarded by `lock`; callers hold it unless a method says
 /// otherwise. Handles on a player are retained: `dispose()` unbinds them,
@@ -81,11 +86,17 @@ private let maxHeld = 100
 internal final class Binding {
     /// Recursive: Lens's reports go out while it is held.
     let lock = NSRecursiveLock()
-    let adapter: (any LensPlayerAdapter)?
-    /// With a player, Lens observes it and the player's source decides the session.
+    /// The player this binding is for — the object itself or an adapter's
+    /// `target` — kept alive while handles are on it: an `ObjectIdentifier`
+    /// outlives nothing, and a freed key's could name the next object.
+    let key: AnyObject?
+    /// With an observed adapter, Lens watches the player and its source decides the session.
     private(set) var player: PlayerObserver?
     private var members: [WeakMember] = []
     private var retained: [SessionMember] = []
+    /// What each handle joined with, in join order; only handles with an adapter.
+    private var joined: [(member: WeakMember, adapter: any LensPlayerAdapter)] = []
+    private var secondAdapterWarned = false
     var current: SessionState?
     /// A player's source that has not been played yet: its session starts at the first play request.
     private var waiting: SessionContext?
@@ -99,9 +110,8 @@ internal final class Binding {
         init(_ value: SessionMember) { self.value = value }
     }
 
-    init(adapter: (any LensPlayerAdapter)?) {
-        self.adapter = adapter
-        self.player = adapter.map { PlayerObserver(binding: self, adapter: $0) }
+    init(key: AnyObject?) {
+        self.key = key
     }
 
     var handles: [SessionMember] {
@@ -109,14 +119,60 @@ internal final class Binding {
         return members.compactMap(\.value)
     }
 
-    func bind(_ handle: SessionMember) {
+    /// A handle joins; with an adapter, Lens observes it unless another
+    /// already is — then the handle shares the session unobserved, with one
+    /// warning per binding, or none under `strict`, which throws before the
+    /// handle is bound. Returns the observer to attach, outside the lock, when
+    /// this adapter is the one observed.
+    func bind(_ handle: SessionMember, adapter: (any LensPlayerAdapter)?, strict: Bool) throws
+        -> PlayerObserver?
+    {
+        let observed = player
+        if let adapter, let observed, adapter !== observed.adapter {
+            if strict {
+                throw LensError.invalidOptions("Lens: another adapter already observes this player")
+            }
+            if !secondAdapterWarned {
+                secondAdapterWarned = true
+                Lens.warn(
+                    "Lens: another adapter already observes this player; this one is not observed")
+            }
+        }
         members.append(WeakMember(handle))
-        if adapter != nil { retained.append(handle) }
+        if key != nil { retained.append(handle) }
+        guard let adapter else { return nil }
+        joined.append((WeakMember(handle), adapter))
+        guard observed == nil else { return nil }
+        let observer = PlayerObserver(binding: self, adapter: adapter)
+        player = observer
+        return observer
     }
 
-    func unbind(_ handle: SessionMember) {
+    /// A handle leaves; returns what to run on the main queue. The last one
+    /// releases the binding. When the observed adapter has no handle left, the
+    /// next adapter in join order takes over the player's playback state; with
+    /// none, the session goes on driven by the handles, without player keys.
+    func unbind(_ handle: SessionMember) -> (() -> Void)? {
         members.removeAll { $0.value == nil || $0.value === handle }
         retained.removeAll { $0 === handle }
+        joined.removeAll { $0.member.value == nil || $0.member.value === handle }
+        if handles.isEmpty { return release() }
+        guard let observed = player else { return nil }
+        if joined.contains(where: { $0.adapter === observed.adapter }) { return nil }
+        let unsubscribe = observed.detach()
+        guard let next = joined.first?.adapter else {
+            player = nil
+            waiting = nil
+            held.removeAll()
+            return unsubscribe
+        }
+        let replacement = PlayerObserver(
+            binding: self, adapter: next, handover: observed.handover())
+        player = replacement
+        return {
+            unsubscribe?()
+            replacement.attach()
+        }
     }
 
     // MARK: Session lifecycle
@@ -243,9 +299,11 @@ internal final class Binding {
     /// Returns the adapter's release, for the main queue.
     func release() -> (() -> Void)? {
         released = true
-        guard let adapter else { return nil }
+        guard let key else { return nil }
         Binding.registryLock.lock()
-        Binding.players.removeValue(forKey: ObjectIdentifier(adapter))
+        if Binding.players[ObjectIdentifier(key)] === self {
+            Binding.players.removeValue(forKey: ObjectIdentifier(key))
+        }
         Binding.registryLock.unlock()
         return player?.detach()
     }
@@ -387,7 +445,8 @@ internal final class Binding {
     // MARK: The registry
 
     private static let registryLock = NSLock()
-    /// Bindings by adapter, compared by reference identity: every handle on one player shares one.
+    /// Bindings by player key, compared by reference identity: every handle on one player shares
+    /// one. A key-only binding stays registered while any handle is on it, so a later adapter finds it.
     private nonisolated(unsafe) static var players: [ObjectIdentifier: Binding] = [:]
     /// Bindings with a live session — what the termination edge must quit.
     private nonisolated(unsafe) static var live: [ObjectIdentifier: Binding] = [:]
@@ -395,23 +454,23 @@ internal final class Binding {
     /// The binding for `adapter`, locked; a fresh one without. A binding
     /// released meanwhile is gone from the registry, so the next try gets a
     /// new one.
-    static func lockedBinding(for adapter: (any LensPlayerAdapter)?) -> Binding {
+    static func lockedBinding(for key: AnyObject?) -> Binding {
         while true {
-            let binding = bindingFor(adapter)
+            let binding = bindingFor(key)
             binding.lock.lock()
             if !binding.released { return binding }
             binding.lock.unlock()
         }
     }
 
-    private static func bindingFor(_ adapter: (any LensPlayerAdapter)?) -> Binding {
-        guard let adapter else { return Binding(adapter: nil) }
+    private static func bindingFor(_ key: AnyObject?) -> Binding {
+        guard let key else { return Binding(key: nil) }
         registryLock.lock()
         defer { registryLock.unlock() }
-        let key = ObjectIdentifier(adapter)
-        if let binding = players[key] { return binding }
-        let binding = Binding(adapter: adapter)
-        players[key] = binding
+        let id = ObjectIdentifier(key)
+        if let binding = players[id] { return binding }
+        let binding = Binding(key: key)
+        players[id] = binding
         return binding
     }
 
@@ -460,6 +519,7 @@ internal final class Binding {
             let release = binding.release()
             binding.members.removeAll()
             binding.retained.removeAll()
+            binding.joined.removeAll()
             binding.current = nil
             binding.waiting = nil
             binding.held.removeAll()

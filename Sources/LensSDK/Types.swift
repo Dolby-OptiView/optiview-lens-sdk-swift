@@ -54,14 +54,18 @@ public struct LensJoinOptions {
     /// count is reached or the queue flushes on session end, dispose, or
     /// lifecycle flush.
     public var batch: LensBatch?
-    /// The player this handle observes, through its adapter — compared by
-    /// identity, so wrap a player once and hand the same adapter to every SDK.
-    /// Lens then owns the session: it watches the player, reports playback
-    /// state and the player's CMCD keys, and starts a session at the first
-    /// play request on each source and ends it itself.
-    /// Handles naming the same adapter share that session. Without one, the
-    /// handle runs its own sessions through `startSession`/`endSession`.
-    public var player: (any LensPlayerAdapter)?
+    /// The player this handle is on, compared by identity: handles on one
+    /// player share one session, whichever SDK they come from. Either the
+    /// player object itself — a plain key, Lens does not observe it — or a
+    /// `LensPlayerAdapter` whose `target` is that object. With an adapter Lens
+    /// owns the session: it watches the player, reports playback state and the
+    /// player's CMCD keys, and starts a session at the first play request on
+    /// each source and ends it itself. One adapter per player is observed, the
+    /// first joined; a later one shares the session unobserved (a warning;
+    /// `strict` throws). Without one, the handle runs its own sessions through
+    /// `startSession`/`endSession`, as do key-only handles until an adapter
+    /// joins their player.
+    public var player: AnyObject?
 
     public init(
         namespace: String,
@@ -69,7 +73,7 @@ public struct LensJoinOptions {
         consent: LensConsent = .granted,
         strict: Bool = false,
         heartbeatMs: Int64 = 30_000,
-        player: (any LensPlayerAdapter)? = nil,
+        player: AnyObject? = nil,
         batch: LensBatch? = nil
     ) {
         self.namespace = namespace
@@ -107,15 +111,16 @@ public struct LensSourceChange {
 }
 
 public protocol LensHandle: AnyObject {
-    /// Temporary session-control door for handles joined without a `player`:
-    /// the integrator tells Lens when a viewing session starts. Starting while
-    /// one is active rolls it (new sid). With a `player`, Lens owns the session
+    /// Temporary session-control door for handles without an observed player
+    /// adapter: the integrator tells Lens when a viewing session starts.
+    /// Starting while one is active rolls it (new sid). With an adapter on the
+    /// player, Lens owns the session
     /// and this warns and returns the current one — or, between sessions, a
     /// placeholder no report carries, as a disposed handle does; read `session`
     /// instead.
     @discardableResult
     func startSession(_ options: LensStartSessionOptions) -> LensSession
-    /// Ends this handle's session; with a `player`, warns and does nothing.
+    /// Ends this handle's session; with an adapter on the player, warns and does nothing.
     func endSession()
     /// The active session, or nil between sessions.
     var session: LensSession? { get }

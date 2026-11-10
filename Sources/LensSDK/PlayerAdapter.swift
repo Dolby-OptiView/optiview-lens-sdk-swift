@@ -23,6 +23,11 @@ import Foundation
 ///
 /// Every optional field: leave it nil while unknown, never a placeholder.
 public protocol LensPlayerAdapter: AnyObject {
+    /// The player this adapter wraps. Handles that join with the player itself
+    /// and handles that join with an adapter on it share one session: Lens
+    /// keys the session on `target`. An adapter that wraps nothing names
+    /// itself. Read once, when the handle joins.
+    var target: AnyObject { get }
     /// The player product, e.g. `AVPlayer` or `THEOplayer`, as its maker names it.
     var playerName: String { get }
     /// The player's version as it reports it, build suffixes included.

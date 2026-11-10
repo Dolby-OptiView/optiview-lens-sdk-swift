@@ -122,6 +122,250 @@ final class PlayerTests: XCTestCase {
 
     private static let urlA = "https://cdn-a.example.com/movie.m3u8"
 
+    // MARK: one session per player across adapters
+
+    private static let urlB = "https://cdn-b.example.com/other.m3u8"
+
+    private func joinOn(_ player: AnyObject, namespace: String = "ads", strict: Bool = false) throws
+        -> LensHandle
+    {
+        try Lens.join(
+            LensJoinOptions(
+                namespace: namespace, destinations: [ingest], strict: strict, heartbeatMs: 0,
+                player: player))
+    }
+
+    func testHandlesOnOnePlainKeyShareASessionTheyDriveThemselvesWithoutPlayerKeys() throws {
+        let theoplayer = NSObject()
+        let ads = try joinOn(theoplayer)
+        let other = try joinOn(theoplayer, namespace: "live")
+        XCTAssertNil(ads.session)
+        let sid = ads.startSession(LensStartSessionOptions(contentId: "movie-1")).sessionId
+        XCTAssertEqual(other.session?.sessionId, sid)
+        other.emitCustom("fallback")
+        XCTAssertEqual(delivered.map(\.session.sessionId), [sid])
+        XCTAssertEqual(delivered.map(\.playbackState), [nil])
+        ads.dispose()
+        XCTAssertEqual(other.session?.sessionId, sid)
+        other.dispose()
+        XCTAssertEqual(delivered.map(\.type), ["ce", "ps"])
+        // Released with its last handle: a new key-only handle starts from nothing.
+        XCTAssertNil(try joinOn(theoplayer).session)
+    }
+
+    func testAnObjectThatOnlyOverlapsTheAdapterShapeIsAPlainKeyNotObserved() throws {
+        final class Partial {
+            var subscribeCalls = 0
+            func subscribe(_ listener: @escaping (LensPlayerFact) -> Void) -> () -> Void {
+                subscribeCalls += 1
+                return {}
+            }
+        }
+        let partial = Partial()
+        let lens = try joinOn(partial)
+        XCTAssertEqual(partial.subscribeCalls, 0)
+        XCTAssertEqual(lens.startSession().sessionId, lens.session?.sessionId)
+        XCTAssertNil(probe(lens).status)
+        lens.dispose()
+    }
+
+    func testAKeyHandleAndAnAdapterOnThatKeyShareThePlayerOwnedSession() throws {
+        let theoplayer = NSObject()
+        let player = FakePlayer(target: theoplayer)
+        let ads = try joinOn(theoplayer)
+        let connector = try joinOn(player, namespace: "player")
+        player.load(LensPlayerSource(url: Self.urlA, autoplay: true))
+        let sid = try XCTUnwrap(connector.session).sessionId
+        XCTAssertEqual(ads.session?.sessionId, sid)
+        ads.startSession()
+        ads.endSession()
+        XCTAssertEqual(ads.session?.sessionId, sid)
+        XCTAssertTrue(warnings.contains { $0.contains("startSession() ignored") })
+        XCTAssertTrue(warnings.contains { $0.contains("endSession() ignored") })
+        ads.emit(.adStart)
+        XCTAssertEqual(delivered.map(\.type), ["ps", "as"])
+        XCTAssertEqual(delivered.map(\.playbackState), ["s", "s"])
+    }
+
+    func testAnAdapterJoiningAfterAKeyOnlySessionStartedTakesItOverOnTheSameSid() throws {
+        let theoplayer = NSObject()
+        let ads = try joinOn(theoplayer)
+        let sid = ads.startSession(LensStartSessionOptions(contentId: "movie-1")).sessionId
+        ads.emit(.adStart)
+        let player = FakePlayer(target: theoplayer)
+        player.load(LensPlayerSource(url: Self.urlA, contentId: "movie-2"))
+        player.set { $0.paused = false }
+        let connector = try joinOn(player, namespace: "player")
+        XCTAssertEqual(connector.session?.sessionId, sid)
+        XCTAssertEqual(ads.session?.sessionId, sid)
+        player.fire(.pause)
+        XCTAssertEqual(delivered.map(\.type), ["as", "c", "ps", "ps"])
+        XCTAssertEqual(delivered.map(\.session.sessionId), [sid, sid, sid, sid])
+        XCTAssertEqual(delivered.map(\.playbackState), [nil, "p", "p", "a"])
+        XCTAssertEqual(delivered[3].contentId, "movie-2")
+        // From here the player owns the session: its next source rolls it.
+        player.load(LensPlayerSource(url: Self.urlB, autoplay: true))
+        XCTAssertNotEqual(ads.session?.sessionId, sid)
+    }
+
+    func testAnAdapterTakingOverARunningSessionHeartbeatsFromTheMomentItJoins() throws {
+        captureTickers()
+        let theoplayer = NSObject()
+        let ads = try Lens.join(
+            LensJoinOptions(namespace: "ads", destinations: [ingest], player: theoplayer))
+        let sid = ads.startSession().sessionId
+        XCTAssertEqual(running.count, 1)
+        let player = FakePlayer(target: theoplayer)
+        player.load(LensPlayerSource(url: Self.urlA))
+        player.set { $0.paused = false }
+        let connector = try Lens.join(
+            LensJoinOptions(namespace: "player", destinations: [ingest], player: player))
+        XCTAssertEqual(connector.session?.sessionId, sid)
+        XCTAssertEqual(running.count, 2)
+        XCTAssertEqual(reports("t").map(\.namespace), ["ads", "player"])
+    }
+
+    func testAnAdapterJoiningAKeyOnlyBindingWithoutASessionWaitsForThePlayerAsALateAttach() throws {
+        let theoplayer = NSObject()
+        let ads = try joinOn(theoplayer)
+        let player = FakePlayer(target: theoplayer)
+        _ = try joinOn(player, namespace: "player")
+        XCTAssertNil(ads.session)
+        player.load(LensPlayerSource(url: Self.urlA, autoplay: true))
+        XCTAssertNotNil(ads.session)
+    }
+
+    func testTwoAdaptersOnOnePlayerTheFirstIsObservedLaterOnesJoinUnobservedWithOneWarning() throws
+    {
+        let theoplayer = NSObject()
+        let first = FakePlayer(target: theoplayer)
+        let second = FakePlayer(target: theoplayer)
+        let third = FakePlayer(target: theoplayer)
+        let a = try joinOn(first)
+        let b = try joinOn(second, namespace: "live")
+        _ = try joinOn(third, namespace: "other")
+        XCTAssertEqual(first.subscribeCalls, 1)
+        XCTAssertEqual(second.subscribeCalls, 0)
+        XCTAssertEqual(third.subscribeCalls, 0)
+        XCTAssertEqual(warnings.count, 1)
+        XCTAssertTrue(warnings[0].contains("another adapter already observes"))
+        first.load(LensPlayerSource(url: Self.urlA, autoplay: true))
+        XCTAssertEqual(b.session?.sessionId, a.session?.sessionId)
+        second.load(LensPlayerSource(url: Self.urlB, autoplay: true))  // nobody listens
+        XCTAssertEqual(b.session?.sessionId, a.session?.sessionId)
+    }
+
+    func testStrictASecondAdapterOnOnePlayerThrowsAndBindsNothing() throws {
+        let theoplayer = NSObject()
+        let first = FakePlayer(target: theoplayer)
+        let second = FakePlayer(target: theoplayer)
+        let a = try joinOn(first)
+        XCTAssertThrowsError(try joinOn(second, namespace: "live", strict: true)) { error in
+            XCTAssertEqual(
+                error as? LensError,
+                .invalidOptions("Lens: another adapter already observes this player"))
+        }
+        XCTAssertEqual(second.subscribeCalls, 0)
+        first.load(LensPlayerSource(url: Self.urlA, autoplay: true))
+        a.dispose()
+        // The rejected handle left no trace: the player is free again.
+        XCTAssertEqual(first.listenerCount, 0)
+        XCTAssertEqual(states(), ["s", "q"])
+        _ = try joinOn(second, namespace: "live", strict: true)
+        XCTAssertEqual(second.subscribeCalls, 1)
+    }
+
+    func testTheObservedAdapterLeavingHandsThePlayerToTheNextAdapterSameSourceSameSession() throws {
+        let theoplayer = NSObject()
+        let first = FakePlayer(target: theoplayer)
+        let second = FakePlayer(target: theoplayer)
+        first.set { $0.droppedFrames = 100 }
+        second.set { $0.droppedFrames = 7 }
+        let a = try joinOn(first)
+        let b = try joinOn(second, namespace: "live")
+        first.load(LensPlayerSource(url: Self.urlA, contentId: "movie-1", autoplay: true))
+        let sid = try XCTUnwrap(b.session).sessionId
+        first.set {
+            $0.droppedFrames = 104
+            $0.currentTime = 30
+        }
+        XCTAssertEqual(status(probe(a))[.droppedFramesAbsolute], .number(4))
+        second.source = LensPlayerSource(url: Self.urlA, contentId: "movie-1")
+        second.set {
+            $0.paused = false
+            $0.currentTime = 31
+        }
+        warnings = []
+        a.dispose()
+        XCTAssertEqual(first.listenerCount, 0)
+        XCTAssertEqual(second.subscribeCalls, 1)
+        XCTAssertEqual(b.session?.sessionId, sid)
+        // The next adapter's initial is a repeat: no state change, no restart.
+        XCTAssertEqual(states(), ["s"])
+        second.set { $0.droppedFrames = 10 }
+        let keys = status(probe(b))
+        XCTAssertEqual(keys[.droppedFramesAbsolute], .number(7))
+        XCTAssertEqual(keys[.playheadTime], .number(31000))
+        XCTAssertEqual(warnings, [])
+    }
+
+    func testTheNextAdapterReportingAnotherSourceStartsANewSession() throws {
+        let theoplayer = NSObject()
+        let first = FakePlayer(target: theoplayer)
+        let second = FakePlayer(target: theoplayer)
+        first.set { $0.droppedFrames = 100 }
+        let a = try joinOn(first)
+        let b = try joinOn(second, namespace: "live")
+        first.load(LensPlayerSource(url: Self.urlA, contentId: "movie-1", autoplay: true))
+        let sid = try XCTUnwrap(b.session).sessionId
+        second.source = LensPlayerSource(url: Self.urlB, contentId: "movie-2", autoplay: true)
+        second.set {
+            $0.paused = false
+            $0.droppedFrames = 50
+        }
+        a.dispose()
+        let next = try XCTUnwrap(b.session).sessionId
+        XCTAssertNotEqual(next, sid)
+        XCTAssertEqual(states(), ["s", "q", "s"])
+        XCTAssertEqual(reports("ps").map(\.session.sessionId), [sid, sid, next])
+        XCTAssertEqual(delivered[2].contentId, "movie-2")
+        second.set { $0.droppedFrames = 53 }
+        XCTAssertEqual(status(probe(b))[.droppedFramesAbsolute], .number(3))
+    }
+
+    func testTheLastAdapterLeavingAKeyKeepsTheSessionOnTheHandlesAndReopensTheDoor() throws {
+        let theoplayer = NSObject()
+        let player = FakePlayer(target: theoplayer)
+        let ads = try joinOn(theoplayer)
+        let connector = try joinOn(player, namespace: "player")
+        player.load(LensPlayerSource(url: Self.urlA, autoplay: true))
+        let sid = try XCTUnwrap(ads.session).sessionId
+        connector.dispose()
+        XCTAssertEqual(player.listenerCount, 0)
+        XCTAssertEqual(ads.session?.sessionId, sid)
+        ads.emit(.adStart)
+        XCTAssertEqual(delivered.map(\.type), ["ps", "as"])
+        XCTAssertEqual(delivered.map(\.playbackState), ["s", nil])
+        let next = ads.startSession().sessionId
+        XCTAssertNotEqual(next, sid)
+        XCTAssertEqual(warnings, [])
+        ads.dispose()
+        XCTAssertEqual(delivered.map(\.session.sessionId), [sid, sid, sid, next])
+    }
+
+    func testAKeyHandleLeavingBeforeTheAdapterHandleStillReleasesThePlayerLast() throws {
+        let theoplayer = NSObject()
+        let player = FakePlayer(target: theoplayer)
+        let connector = try joinOn(player, namespace: "player")
+        let ads = try joinOn(theoplayer)
+        player.load(LensPlayerSource(url: Self.urlA, autoplay: true))
+        ads.dispose()
+        XCTAssertEqual(player.listenerCount, 1)
+        connector.dispose()
+        XCTAssertEqual(player.listenerCount, 0)
+        XCTAssertEqual(states(), ["s", "q"])
+    }
+
     // MARK: session ownership on a player
 
     func testTwoHandlesOnOneAdapterShareTheSessionItsFirstPlaybackAttemptStarts() throws {
@@ -873,6 +1117,7 @@ final class PlayerTests: XCTestCase {
 
     /// Subscribes without delivering `initial`, breaking the contract.
     private final class SilentPlayer: LensPlayerAdapter {
+        var target: AnyObject { self }
         let playerName = "silent"
         var listener: ((LensPlayerFact) -> Void)?
 
@@ -1434,6 +1679,7 @@ final class PlayerTests: XCTestCase {
 
     /// Keeps its listener forever, however Lens releases it.
     private final class StubbornPlayer: LensPlayerAdapter {
+        var target: AnyObject { self }
         let playerName = "stubborn"
         var listener: ((LensPlayerFact) -> Void)?
 

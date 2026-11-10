@@ -11,6 +11,9 @@ import Foundation
 /// asks. It records where Lens read it from, so tests can hold Lens to the
 /// main queue.
 final class FakePlayer: LensPlayerAdapter {
+    /// The player this adapter stands for; itself unless a test shares one between adapters.
+    var target: AnyObject { explicitTarget ?? self }
+    private let explicitTarget: AnyObject?
     let playerName = "fake"
     var snapshotValues = LensPlayerSnapshot(currentTime: 0, paused: true, ended: false)
     var properties = LensPlayerProperties()
@@ -23,6 +26,10 @@ final class FakePlayer: LensPlayerAdapter {
 
     private var listeners: [(id: Int, listener: (LensPlayerFact) -> Void)] = []
     private var nextId = 0
+
+    init(target: AnyObject? = nil) {
+        explicitTarget = target
+    }
 
     func subscribe(_ listener: @escaping (LensPlayerFact) -> Void) -> () -> Void {
         subscribeCalls += 1

@@ -145,7 +145,7 @@ public enum Lens {
             }
         }
         _ = Binding.lifecycleHooks
-        return Handle(options: options, backend: lockBackend())
+        return try Handle(options: options, backend: lockBackend())
     }
 
     /// Epoch milliseconds, as every report stamps them.
@@ -199,7 +199,7 @@ public enum Lens {
         /// The ad events whose typed payload may carry the ad's content ID (§8.2.8).
         private static let adCidEvents: Set<String> = ["as", "ae", "sk"]
 
-        init(options: LensJoinOptions, backend: EffectiveBackend) {
+        init(options: LensJoinOptions, backend: EffectiveBackend) throws {
             self.namespace = options.namespace
             self.strict = options.strict
             self.transport = Transport(
@@ -208,18 +208,35 @@ public enum Lens {
                 ingestBatch: options.batch
             )
             self.consent = options.consent
-            let binding = Binding.lockedBinding(for: options.player)
+            // The adapter's target is read here, before any lock: it is a call into the adapter.
+            let adapter = options.player as? any LensPlayerAdapter
+            let key: AnyObject? = adapter.map { $0.target } ?? options.player
+            let binding = Binding.lockedBinding(for: key)
             self.binding = binding
             self.lock = binding.lock
             self.heartbeatMs = options.heartbeatMs
             teardown.add(transport.dispose)
-            binding.bind(self)
-            let attach = binding.player != nil && binding.handles.count == 1
-            let opening = !attach && restartCadence()
-            let cadence = self.cadence
+            let observer: PlayerObserver?
+            do {
+                observer = try binding.bind(self, adapter: adapter, strict: strict)
+            } catch {
+                lock.unlock()
+                teardown.release()
+                throw error
+            }
+            let opening = observer == nil && restartCadence()
+            var cadence = self.cadence
+            // A session the handles started is taken over, not restarted: this
+            // handle still joins it running.
+            let before = binding.current
             lock.unlock()
-            if attach {
-                binding.player?.attach()
+            if let observer {
+                observer.attach()
+                lock.lock()
+                let running = before != nil && binding.current === before && restartCadence()
+                cadence = self.cadence
+                lock.unlock()
+                if running { beat(cadence) }
             } else if opening {
                 beat(cadence)
             }
@@ -414,8 +431,7 @@ public enum Lens {
             // goes out through this handle before its transport is released.
             if binding.current != nil && binding.handles.count == 1 { binding.end() }
             binding.dropHeld(self)
-            binding.unbind(self)
-            let release = binding.handles.isEmpty ? binding.release() : nil
+            let release = binding.unbind(self)
             disposed = true
             adContentId = nil
             stopHeartbeat = nil

@@ -271,6 +271,8 @@ internal final class Playback {
     private var droppedLast: Double?
     private var droppedOffset: Double = 0
     private var droppedBase: Double = 0
+    /// After a handover: the next counter read is the zero point, not a jump.
+    private var droppedRebase = false
     private let now: () -> Double
 
     init(now: @escaping () -> Double) {
@@ -285,7 +287,12 @@ internal final class Playback {
         snapshotAt = now()
         if let dropped = next.droppedFrames, dropped >= 0 {
             let value = Double(dropped)
-            if let last = droppedLast, value < last { droppedOffset += last }
+            if droppedRebase {
+                droppedRebase = false
+                droppedBase = value
+            } else if let last = droppedLast, value < last {
+                droppedOffset += last
+            }
             droppedLast = value
         }
         settleUrgency()
@@ -469,10 +476,21 @@ internal final class Playback {
     /// `dfa`, counted from the session start: the adapter cannot know where sessions begin.
     private func droppedFrameKeys() -> StatusKeys {
         var keys = StatusKeys()
-        if let last = droppedLast {
-            keys[.droppedFramesAbsolute] = .number(max(droppedOffset + last - droppedBase, 0))
-        }
+        if droppedLast != nil { keys[.droppedFramesAbsolute] = .number(droppedSoFar()) }
         return keys
+    }
+
+    private func droppedSoFar() -> Double {
+        max(droppedOffset + (droppedLast ?? 0) - droppedBase, 0)
+    }
+
+    /// The next adapter on this player takes over: `dfa` stands where it is and
+    /// counts on from that adapter's first counter read, whatever it holds.
+    func handover() {
+        droppedOffset = droppedSoFar()
+        droppedBase = 0
+        droppedLast = nil
+        droppedRebase = true
     }
 
     private func bufferLength() -> [InnerListItem]? {
@@ -558,7 +576,10 @@ internal final class Playback {
         let now = self.now()
         var keys = StatusKeys()
         // The first state on a source: `dfa` counts from here, as nothing was rendered before.
-        if previous == nil { droppedBase = droppedOffset + (droppedLast ?? 0) }
+        if previous == nil {
+            droppedRebase = false
+            droppedBase = droppedOffset + (droppedLast ?? 0)
+        }
         if previous == .rebuffering, let from = rebufferFrom {
             let duration = jsRound(now - from)
             starvedMs += duration
