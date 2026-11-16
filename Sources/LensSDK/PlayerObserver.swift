@@ -242,9 +242,10 @@ internal final class PlayerObserver {
             return
         }
         // The old session ends on what it was; the new source starts from its own properties.
-        binding.end()
+        let replace = binding.current != nil || binding.awaitingPlayback
+        binding.end(replacing: source != nil)
         playback.newSource(properties)
-        if let source { startSession(source, lateAttach: false) }
+        if let source { startSession(source, lateAttach: false, replace: replace) }
     }
 
     private func changed(_ properties: LensPlayerProperties) {
@@ -270,9 +271,9 @@ internal final class PlayerObserver {
     /// The source awaits its first play request, which starts the session:
     /// the opening state when it is one (autoplay, a late attach to a player
     /// that was played), else a later fact. A preload is held until then.
-    private func startSession(_ source: LensPlayerSource, lateAttach: Bool) {
+    private func startSession(_ source: LensPlayerSource, lateAttach: Bool, replace: Bool = false) {
         guard let binding else { return }
-        binding.await(sessionContext(for: source))
+        binding.await(sessionContext(for: source), replace: replace)
         binding.reportAll(playback.begin(source, lateAttach: lateAttach))
     }
 

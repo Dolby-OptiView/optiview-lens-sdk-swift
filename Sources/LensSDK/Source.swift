@@ -51,7 +51,7 @@ private func streamingFormat(_ source: LensPlayerSource) -> StreamFormat? {
     let path = withoutQuery(source.url ?? "").lowercased()
     if path.hasSuffix(".m3u8") { return .hls }
     if path.hasSuffix(".mpd") { return .mpegDash }
-    if path.range(of: "\\.ism[lc]?/manifest$", options: .regularExpression) != nil {
+    if path.range(of: "\\.ism[lc]?/manifest\\z", options: .regularExpression) != nil {
         return .smoothStreaming
     }
     return nil

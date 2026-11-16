@@ -18,26 +18,26 @@ internal enum Validation {
 
     /// Custom key names: lowercase-letter-first tokens within the wire-key budget
     /// (docs/internals.md).
-    static let keyPattern = "^[a-z][a-z0-9_]*$"
+    static let keyPattern = "\\A[a-z][a-z0-9_]*\\z"
     // Becomes per-producer when customer prefixes land (#14).
     static let keyMax = 64 - Encoding.wirePrefix.count
 
     /// Custom event names: simple tokens, max 64 chars (the spec's cen budget).
-    static let namePattern = "^[A-Za-z0-9_-]+$"
+    static let namePattern = "\\A[A-Za-z0-9_-]+\\z"
     static let nameMax = 64
 
     /// Setup strings (namespace, external session ids): printable ASCII, max 64 (the spec's sid budget).
-    static let setupPattern = "^[\\x20-\\x7E]{1,64}$"
+    static let setupPattern = "\\A[\\x20-\\x7E]{1,64}\\z"
 
     /// RFC 8941 sf-token grammar for explicit custom token values.
     static let tokenPattern = "\\A[A-Za-z*][A-Za-z0-9!#$%&'*+\\-.^_`|~:/]*\\z"
     static let tokenMax = 64
 
     /// Content IDs (spec `cid`): printable ASCII, max 128 (the spec's raised cid budget).
-    static let contentIdPattern = "^[\\x20-\\x7E]{1,128}$"
+    static let contentIdPattern = "\\A[\\x20-\\x7E]{1,128}\\z"
 
     /// Hostnames (spec `h`): printable ASCII, max 128 — same budget as `cid`.
-    static let hostnamePattern = "^[\\x20-\\x7E]{1,128}$"
+    static let hostnamePattern = "\\A[\\x20-\\x7E]{1,128}\\z"
 
     /// Streaming format (`sf`) tokens (CTA-5004-B Table 1).
     static let sfTokens: Set<String> = ["d", "h", "s", "e", "o"]

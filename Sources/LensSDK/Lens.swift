@@ -187,6 +187,15 @@ public enum Lens {
         private var heartbeatMs: Int64
         private var consent: LensConsent
         private var disposed = false
+        private final class SessionDelegateRegistration {
+            weak var delegate: LensSessionDelegate?
+
+            init(_ delegate: LensSessionDelegate) {
+                self.delegate = delegate
+            }
+        }
+
+        private var sessionDelegates: [SessionDelegateRegistration] = []
         private var stopHeartbeat: (() -> Void)?
         /// Bumped whenever the cadence stops, so a tick already on its way to
         /// the main queue cannot outlive the cadence it belongs to.
@@ -195,6 +204,11 @@ public enum Lens {
 
         // The ad's `cid` while a §8.2.8 swap is open; cleared when the ad or break ends.
         private var adContentId: String?
+
+        /// Whether this handle brought an adapter. A handle on the plain player
+        /// cannot know whether one is observed, so only an adapter's handle is
+        /// warned that the session door is shut.
+        private let joinedWithAdapter: Bool
 
         /// The ad events whose typed payload may carry the ad's content ID (§8.2.8).
         private static let adCidEvents: Set<String> = ["as", "ae", "sk"]
@@ -211,6 +225,7 @@ public enum Lens {
             // The adapter's target is read here, before any lock: it is a call into the adapter.
             let adapter = options.player as? any LensPlayerAdapter
             let key: AnyObject? = adapter.map { $0.target } ?? options.player
+            self.joinedWithAdapter = adapter != nil
             let binding = Binding.lockedBinding(for: key)
             self.binding = binding
             self.lock = binding.lock
@@ -244,6 +259,12 @@ public enum Lens {
 
         @discardableResult
         func startSession(_ options: LensStartSessionOptions) -> LensSession {
+            lock.lock()
+            defer { lock.unlock() }
+            if binding.ignoreInsideListener() {
+                return binding.session
+                    ?? LensSession(sessionId: options.sessionId ?? Lens.sessionIdFactory())
+            }
             if let sessionId = options.sessionId,
                 !Validation.matches(sessionId, Validation.setupPattern)
             {
@@ -266,15 +287,13 @@ public enum Lens {
                 Lens.usageViolation("Lens: streamType must be one of 'v', 'l', 'll'")
                 return LensSession(sessionId: UUID().uuidString.lowercased())
             }
-            lock.lock()
-            defer { lock.unlock() }
-            if binding.player != nil && !disposed {
+            if binding.player != nil && !disposed && joinedWithAdapter {
                 Lens.warn("Lens: startSession() ignored — sessions on a player are Lens-owned")
             }
-            if disposed || binding.player != nil {
-                return binding.current?.session
-                    ?? LensSession(sessionId: options.sessionId ?? Lens.sessionIdFactory())
+            if disposed {
+                return LensSession(sessionId: options.sessionId ?? Lens.sessionIdFactory())
             }
+            if binding.player != nil { return binding.decide() }
             // Starting while a session runs rolls it.
             binding.start(
                 SessionContext(
@@ -285,16 +304,22 @@ public enum Lens {
 
         func endSession() {
             lock.lock()
+            if binding.ignoreInsideListener() {
+                lock.unlock()
+                return
+            }
             if disposed {
                 lock.unlock()
                 return
             }
             if binding.player != nil {
                 lock.unlock()
-                Lens.warn("Lens: endSession() ignored — sessions on a player are Lens-owned")
+                if joinedWithAdapter {
+                    Lens.warn("Lens: endSession() ignored — sessions on a player are Lens-owned")
+                }
                 return
             }
-            if binding.current != nil {
+            if binding.session != nil {
                 binding.end()
                 lock.unlock()
                 return
@@ -305,6 +330,9 @@ public enum Lens {
         }
 
         func reportSourceChange(_ change: LensSourceChange) {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !binding.ignoreInsideListener() else { return }
             if let contentId = change.contentId,
                 !Validation.matches(contentId, Validation.contentIdPattern)
             {
@@ -323,11 +351,12 @@ public enum Lens {
                 Lens.usageViolation("Lens: streamingFormat must be one of 'd', 'h', 's', 'e', 'o'")
                 return
             }
-            lock.lock()
-            defer { lock.unlock() }
             guard !disposed else { return }
             if binding.player != nil {
-                Lens.warn("Lens: reportSourceChange() ignored — Lens observes the player source")
+                if joinedWithAdapter {
+                    Lens.warn(
+                        "Lens: reportSourceChange() ignored — Lens observes the player source")
+                }
                 return
             }
             guard let current = binding.current else { return }
@@ -349,7 +378,52 @@ public enum Lens {
         var session: LensSession? {
             lock.lock()
             defer { lock.unlock() }
-            return disposed ? nil : binding.current?.session
+            return disposed ? nil : binding.session
+        }
+
+        @discardableResult
+        func addSessionDelegate(_ delegate: LensSessionDelegate) -> LensSessionRemover {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !disposed else { return LensSessionRemover {} }
+            sessionDelegates.removeAll { $0.delegate == nil }
+            let registration =
+                sessionDelegates.first { $0.delegate === delegate }
+                ?? SessionDelegateRegistration(delegate)
+            if !sessionDelegates.contains(where: { $0 === registration }) {
+                sessionDelegates.append(registration)
+            }
+            return LensSessionRemover { [weak self] in
+                guard let self else { return }
+                lock.lock()
+                defer { lock.unlock() }
+                sessionDelegates.removeAll { $0 === registration || $0.delegate == nil }
+            }
+        }
+
+        func removeSessionDelegate(_ delegate: LensSessionDelegate) {
+            lock.lock()
+            defer { lock.unlock() }
+            sessionDelegates.removeAll { $0.delegate === delegate || $0.delegate == nil }
+        }
+
+        private func notifySessionDelegates(_ notify: (LensSessionDelegate) -> Void) {
+            sessionDelegates.removeAll { $0.delegate == nil }
+            for entry in sessionDelegates {
+                if let delegate = entry.delegate,
+                    sessionDelegates.contains(where: { $0 === entry })
+                {
+                    notify(delegate)
+                }
+            }
+        }
+
+        func sessionChanged(_ session: LensSession?) {
+            notifySessionDelegates { $0.lensHandle(self, didChangeSession: session) }
+        }
+
+        func sessionReportingStarted(_ session: LensSession) {
+            notifySessionDelegates { $0.lensHandle(self, didStartSession: session) }
         }
 
         func emit<P: LensEventPayload>(_ type: LensEventType<P>, payload: P?) {
@@ -423,16 +497,21 @@ public enum Lens {
 
         func dispose() {
             lock.lock()
+            if binding.ignoreInsideListener() {
+                lock.unlock()
+                return
+            }
             if disposed {
                 lock.unlock()
                 return
             }
             // The last bound handle leaving is a session end — the quit report
             // goes out through this handle before its transport is released.
-            if binding.current != nil && binding.handles.count == 1 { binding.end() }
+            if binding.session != nil && binding.handles.count == 1 { binding.end() }
             binding.dropHeld(self)
             let release = binding.unbind(self)
             disposed = true
+            sessionDelegates.removeAll()
             adContentId = nil
             stopHeartbeat = nil
             lock.unlock()

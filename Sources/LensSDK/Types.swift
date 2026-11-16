@@ -110,22 +110,39 @@ public struct LensSourceChange {
     }
 }
 
+public protocol LensSessionDelegate: AnyObject {
+    func lensHandle(_ handle: LensHandle, didChangeSession session: LensSession?)
+    func lensHandle(_ handle: LensHandle, didStartSession session: LensSession)
+}
+
+extension LensSessionDelegate {
+    public func lensHandle(_ handle: LensHandle, didChangeSession session: LensSession?) {}
+    public func lensHandle(_ handle: LensHandle, didStartSession session: LensSession) {}
+}
+
 public protocol LensHandle: AnyObject {
     /// Temporary session-control door for handles without an observed player
     /// adapter: the integrator tells Lens when a viewing session starts.
     /// Starting while one is active rolls it (new sid). With an adapter on the
-    /// player, Lens owns the session
-    /// and this warns and returns the current one — or, between sessions, a
-    /// placeholder no report carries, as a disposed handle does; read `session`
-    /// instead.
+    /// player, Lens owns playback: this decides a sid if needed and returns it,
+    /// without starting reports or applying a requested sid. Only a handle that joined with an adapter
+    /// is warned: one on the plain player cannot know whether an adapter is there.
     @discardableResult
     func startSession(_ options: LensStartSessionOptions) -> LensSession
-    /// Ends this handle's session; with an adapter on the player, warns and does nothing.
+    /// Ends this handle's session; with an adapter on the player, does nothing,
+    /// warning only a handle that joined with an adapter.
     func endSession()
-    /// The active session, or nil between sessions.
+    /// The decided session, including before playback starts, or nil when none is decided.
     var session: LensSession? { get }
-    /// Report that the playback source changed, for handles without a
-    /// `player`; with one, Lens observes the source and this warns.
+
+    /// Follows session decisions and reporting starts synchronously under the binding's lock,
+    /// before reports go out. Keep callbacks short. Holds the delegate weakly; dropping the remover does nothing.
+    @discardableResult
+    func addSessionDelegate(_ delegate: LensSessionDelegate) -> LensSessionRemover
+    func removeSessionDelegate(_ delegate: LensSessionDelegate)
+    /// Report that the playback source changed, for handles without an
+    /// observed player adapter; with one, Lens observes the source and this
+    /// does nothing, warning only a handle that joined with an adapter.
     /// `newSession: false` keeps the session — the sid survives, the context
     /// updates, and the spec's own change events (`c`, `h`) fire only for what
     /// actually changed. `newSession: true` rotates the sid, exactly like

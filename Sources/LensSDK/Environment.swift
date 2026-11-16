@@ -34,14 +34,13 @@ internal enum EnvironmentRuntime {
 
     private static func detect() -> LensEnvironment {
         // Lens ships for iOS and tvOS only; a Mac Catalyst build is os(iOS) and
-        // lands on 'ios', as it should. The package still builds for a dev host
-        // (that is where `swift test` and the scenario app run), which reports
-        // 'ios' rather than a platform token nobody agreed on — and a release
-        // build for anything but the two shipping platforms refuses to compile,
-        // so no such build can reach production.
+        // lands on 'ios', as it should. The Mac only runs tests and the
+        // scenario app, of this repo and of SDKs that use Lens; it reports
+        // 'ios' rather than a platform token nobody agreed on. A release build
+        // for any other platform refuses to compile.
         #if os(tvOS)
             var environment = LensEnvironment(p: "tvos")
-        #elseif os(iOS) || DEBUG
+        #elseif os(iOS) || os(macOS) || DEBUG
             var environment = LensEnvironment(p: "ios")
         #else
             #error("The Lens SDK supports iOS and tvOS only.")

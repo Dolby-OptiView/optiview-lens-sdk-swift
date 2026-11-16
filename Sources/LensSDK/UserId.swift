@@ -9,7 +9,7 @@ internal enum UserIdRuntime {
     // UserDefaults is writable by anything in the app; only a value shaped
     // like our own v4 UUIDs is trusted — anything else is replaced.
     private static let uuidShape =
-        "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        "\\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\\z"
     private static let lock = NSLock()
     private nonisolated(unsafe) static var current: String?
 

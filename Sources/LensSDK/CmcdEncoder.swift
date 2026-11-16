@@ -64,14 +64,15 @@ internal struct CmcdEncoder: ReportEncoder {
         case let flag as Bool:
             return flag ? key : nil
         case let text as String:
-            return "\(key)=\"\(escape(text))\""
+            return "\(key)=\"\(escape(Encoding.sanitize(text)))\""
         case let items as [InnerListItem]:
             let members = items.map { item in
                 Encoding.numberText(item.value) + (item.ot.map { ";\($0)" } ?? "")
             }
             return "\(key)=(\(members.joined(separator: " ")))"
         case let strings as [String]:
-            return "\(key)=(\(strings.map { "\"\(escape($0))\"" }.joined(separator: " ")))"
+            return
+                "\(key)=(\(strings.map { "\"\(escape(Encoding.sanitize($0)))\"" }.joined(separator: " ")))"
         default:
             return "\(key)=\(Encoding.numberText(value))"
         }

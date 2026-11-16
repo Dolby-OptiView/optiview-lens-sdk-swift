@@ -7,6 +7,10 @@ import Foundation
 
 /// What a binding needs from each handle bound to it. Called under the binding's lock.
 internal protocol SessionMember: AnyObject {
+    /// A new session identity, or nil when the session ends, before reporting.
+    func sessionChanged(_ session: LensSession?)
+    /// Reporting begins on this session, before held reports or heartbeats.
+    func sessionReportingStarted(_ session: LensSession)
     /// A session started or rolled: restart the heartbeat.
     func sessionStarted()
     /// The session ended: stop the heartbeat, let pending posts go.
@@ -102,6 +106,21 @@ internal final class Binding {
     private var waiting: SessionContext?
     private var held: [Held] = []
     private var heldOverflowWarned = false
+    private var inSessionListener = false
+    private var startedSessionId: String?
+    private(set) var session: LensSession?
+
+    func ignoreInsideListener() -> Bool {
+        guard inSessionListener else { return false }
+        Lens.warn("Lens: call ignored inside a session listener")
+        return true
+    }
+
+    private func notifySessionChange(_ session: LensSession?) {
+        inSessionListener = true
+        defer { inSessionListener = false }
+        for handle in handles { handle.sessionChanged(session) }
+    }
     /// Set when the last handle leaves; nothing more happens on this binding.
     private(set) var released = false
 
@@ -185,6 +204,7 @@ internal final class Binding {
             quit(replaced)
             for handle in handles { handle.flushTransport() }
         }
+        decide(context, replace: true)
         mint(context)
         for handle in handles { handle.sessionStarted() }
     }
@@ -193,10 +213,23 @@ internal final class Binding {
     /// on it, autoplay included — not now, nor when it preloads (data spec §5):
     /// a source only set or preloaded is not a playback. Whatever ran on the
     /// previous source ends first.
-    func await(_ context: SessionContext) {
-        end()
+    func await(_ context: SessionContext, replace: Bool) {
+        end(replacing: true)
         waiting = context
+        decide(context, replace: replace)
         Binding.markLive(self, true)
+    }
+
+    @discardableResult
+    func decide(_ context: SessionContext = SessionContext(), replace: Bool = false) -> LensSession
+    {
+        if session == nil || replace {
+            let previousId = session?.sessionId
+            session = LensSession(sessionId: context.sessionId ?? Lens.sessionIdFactory())
+            Binding.markLive(self, true)
+            if session!.sessionId != previousId { notifySessionChange(session) }
+        }
+        return session!
     }
 
     /// Whether a source is set and its session has not started yet.
@@ -204,9 +237,17 @@ internal final class Binding {
 
     @discardableResult
     private func mint(_ context: SessionContext) -> SessionState {
-        let minted = SessionState(context: context)
+        var decided = context
+        decided.sessionId = decide(context).sessionId
+        let minted = SessionState(context: decided)
         current = minted
         Binding.markLive(self, true)
+        if startedSessionId != minted.session.sessionId {
+            startedSessionId = minted.session.sessionId
+            inSessionListener = true
+            defer { inSessionListener = false }
+            for handle in handles { handle.sessionReportingStarted(minted.session) }
+        }
         return minted
     }
 
@@ -224,6 +265,7 @@ internal final class Binding {
     /// Without a source set it waits for the next session; with one, it goes
     /// if that source goes first.
     func hold(_ member: SessionMember?, _ send: @escaping (SessionState) -> Void) {
+        decide()
         if held.count >= maxHeld {
             held.removeFirst()
             if !heldOverflowWarned {
@@ -284,15 +326,19 @@ internal final class Binding {
         if hostnameChanged { report(.hostnameChange, state(), nil, at: at) }
     }
 
-    func end() {
+    func end(replacing: Bool = false) {
         // A source that goes before it was played takes what was held under it.
         waiting = nil
         held.removeAll { $0.underSource }
         Binding.markLive(self, false)
-        guard let ending = current else { return }
-        quit(ending)
+        let ending = current
+        if let ending { quit(ending) }
         current = nil
-        for handle in handles { handle.sessionEnded() }
+        if !replacing && session != nil {
+            session = nil
+            notifySessionChange(nil)
+        }
+        if ending != nil { for handle in handles { handle.sessionEnded() } }
     }
 
     /// The last handle left: stop watching the player and forget this binding.
